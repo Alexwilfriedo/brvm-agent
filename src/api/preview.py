@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 
 from ..config import get_settings
 from ..database import get_session
+from ..dates import format_date_fr
 from ..delivery.email_brevo import render_email_html
 from ..delivery.sample_brief import sample_brief, sample_snapshot
 from ..models import Brief
@@ -29,7 +30,7 @@ router = APIRouter(prefix="/preview", tags=["preview"])
 def _today_fr() -> str:
     settings = get_settings()
     tz = ZoneInfo(settings.timezone)
-    return datetime.now(tz).strftime("%A %d %B %Y").capitalize()
+    return format_date_fr(datetime.now(tz))
 
 
 @router.get("/brief", response_class=HTMLResponse)
@@ -87,7 +88,7 @@ def preview_stored_brief(brief_id: int):
         brief = s.get(Brief, brief_id)
         if not brief:
             raise HTTPException(status_code=404, detail="Brief introuvable")
-        date_str = brief.brief_date.astimezone(tz).strftime("%A %d %B %Y").capitalize()
+        date_str = format_date_fr(brief.brief_date.astimezone(tz))
         payload = brief.payload or {}
 
     _subject, html = render_email_html(

@@ -12,10 +12,11 @@ from fastapi import FastAPI
 from sqlalchemy import select
 
 from .api import briefs, preview, runs, schedule, sources
+from .api import recipients as recipients_api
 from .collectors.registry import DEFAULT_SOURCES
 from .config import get_settings
 from .database import get_session, init_db
-from .models import Source
+from .models import Recipient, Source
 from .observability import configure_logging, configure_sentry
 from .scheduler import get_scheduler
 
@@ -37,6 +38,38 @@ def _seed_sources_if_empty() -> None:
             s.add(Source(**src))
 
 
+def _seed_recipients_from_env() -> None:
+    """Au 1er boot : si `recipients` est vide ET que `.env` contient `EMAIL_TO`
+    ou `WHATSAPP_TO_NUMBER`, crée les recipients correspondants.
+
+    Ensuite, l'API admin (/api/recipients) prend la main — ces env vars
+    ne sont plus lues. C'est uniquement pour onboarding zero-click.
+    """
+    with get_session() as s:
+        existing = s.execute(select(Recipient).limit(1)).scalars().first()
+        if existing is not None:
+            return
+        seeded = 0
+        if settings.email_to:
+            s.add(Recipient(
+                channel="email",
+                address=settings.email_to,
+                name=None,
+                notes="Seed initial depuis EMAIL_TO",
+            ))
+            seeded += 1
+        if settings.whatsapp_to_number:
+            s.add(Recipient(
+                channel="whatsapp",
+                address=settings.whatsapp_to_number,
+                name=None,
+                notes="Seed initial depuis WHATSAPP_TO_NUMBER",
+            ))
+            seeded += 1
+        if seeded:
+            logger.info(f"Seeding de {seeded} recipient(s) depuis .env")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup : init DB + seed + scheduler. Shutdown : stop scheduler."""
@@ -46,6 +79,7 @@ async def lifespan(app: FastAPI):
 
     init_db()
     _seed_sources_if_empty()
+    _seed_recipients_from_env()
 
     scheduler = get_scheduler()
     scheduler.start()
@@ -68,6 +102,7 @@ app.include_router(sources.router)
 app.include_router(schedule.router)
 app.include_router(briefs.router)
 app.include_router(runs.router)
+app.include_router(recipients_api.router)
 app.include_router(preview.router)
 
 

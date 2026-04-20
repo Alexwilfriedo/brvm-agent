@@ -3,7 +3,7 @@ import pytest
 
 from src.delivery.email_brevo import render_email_html
 from src.delivery.sample_brief import sample_brief, sample_snapshot
-from src.delivery.whatsapp_brevo import format_brief_short
+from src.delivery.whatsapp import format_brief_short
 
 
 @pytest.mark.unit

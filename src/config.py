@@ -20,20 +20,26 @@ class Settings(BaseSettings):
     # Database
     database_url: str
 
-    # Brevo SMTP
+    # Brevo SMTP — identité expéditeur + credentials (les destinataires sont en DB, table `recipients`)
     brevo_smtp_host: str = "smtp-relay.brevo.com"
     brevo_smtp_port: int = 587
     brevo_smtp_user: str
     brevo_smtp_password: str
     email_from: str
     email_from_name: str = "BRVM Agent"
-    email_to: str
+    # Seed-only : si défini ET si table `recipients` vide au démarrage, un recipient email est créé.
+    # Les destinataires réels sont ensuite gérés via /api/recipients.
+    email_to: str = ""
 
-    # Brevo WhatsApp (optionnel — ship email-first, WhatsApp plus tard)
-    brevo_api_key: str = ""
-    whatsapp_sender_number: str = ""
+    # Wassoya WhatsApp (destinataires en DB — channel='whatsapp')
+    # Laisser wassoya_api_key vide désactive proprement l'envoi WhatsApp.
+    # Wassoya impose d'envoyer via TEMPLATE Meta approuvé, pas en texte libre.
+    wassoya_api_key: str = ""
+    wassoya_api_base_url: str = "https://api.wassoya.com"
+    wassoya_sender_number: str = ""   # numéro WhatsApp Business au format "2250700000000" (sans +)
+    wassoya_template_name: str = ""   # nom du template Meta approuvé (ex: "brvm_brief_v1")
+    # Seed-only : si défini au 1er boot ET recipients vide, crée 1 recipient WA.
     whatsapp_to_number: str = ""
-    whatsapp_template_id: str = ""
 
     # Scheduler
     timezone: str = "Africa/Abidjan"

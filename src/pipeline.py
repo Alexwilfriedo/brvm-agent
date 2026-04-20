@@ -26,8 +26,9 @@ from .collectors.base import CollectionResult, NewsItem
 from .collectors.registry import build_collector
 from .config import get_settings
 from .database import engine, get_session
+from .dates import format_date_fr
 from .delivery.email_brevo import EmailSender, render_email_html
-from .delivery.whatsapp_brevo import WhatsAppSender
+from .delivery.whatsapp import WhatsAppSender
 from .models import Brief, NewsArticle, PipelineRun, Quote, Signal, Source
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ def _run_pipeline_body() -> dict:
     settings = get_settings()
     tz = ZoneInfo(settings.timezone)
     now_local = datetime.now(tz)
-    date_str = now_local.strftime("%A %d %B %Y").capitalize()
+    date_str = format_date_fr(now_local)
 
     summary: dict = {"started_at": now_local.isoformat(), "steps": []}
     logger.info(f"=== Pipeline BRVM — {date_str} ===")

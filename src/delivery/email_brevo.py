@@ -3,8 +3,11 @@
 Le rendu HTML est délégué à un template Jinja2 (`templates/brief_email.html.j2`)
 pour pouvoir itérer sur la charte graphique sans toucher au code Python.
 
-Preview : un brief d'exemple est exposé via `GET /api/briefs/preview` pour
-valider la charte sans envoyer d'email (cf. `src/api/briefs.py`).
+Destinataires : lus depuis la table `recipients` (channel="email", enabled=True).
+Gestion via l'API admin `/api/recipients`.
+
+Preview : un brief d'exemple est exposé via `/preview/brief` pour valider la
+charte sans envoyer d'email (cf. `src/api/preview.py`).
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from ..analysis.schemas import BriefPayload
 from ..config import get_settings
+from .repository import active_recipients
 
 logger = logging.getLogger(__name__)
 
@@ -114,19 +118,42 @@ def render_email_html(
 
 # --- SMTP -------------------------------------------------------------------
 
+class NoRecipientError(RuntimeError):
+    """Aucun destinataire email actif en DB — la livraison ne peut pas avoir lieu."""
+
+
 class EmailSender:
+    """Envoie un brief à tous les recipients actifs (channel='email').
+
+    Une seule session SMTP est ouverte pour tous les destinataires.
+    """
+
     def __init__(self):
         self.s = get_settings()
 
-    def send(self, subject: str, html: str) -> None:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = formataddr((self.s.email_from_name, self.s.email_from))
-        msg["To"] = self.s.email_to
-        msg.attach(MIMEText(html, "html", "utf-8"))
+    def send(self, subject: str, html: str) -> list[str]:
+        """Envoie à tous les recipients email actifs. Retourne la liste
+        des adresses servies."""
+        recipients = active_recipients("email")
+        if not recipients:
+            raise NoRecipientError(
+                "Aucun recipient email actif en DB. "
+                "Ajoute-en via POST /api/recipients ou via EMAIL_TO dans .env (seed)."
+            )
 
-        with smtplib.SMTP(self.s.brevo_smtp_host, self.s.brevo_smtp_port) as server:
+        sent_to: list[str] = []
+        with smtplib.SMTP(self.s.brevo_smtp_host, self.s.brevo_smtp_port, timeout=30) as server:
             server.starttls()
             server.login(self.s.brevo_smtp_user, self.s.brevo_smtp_password)
-            server.send_message(msg)
-        logger.info(f"Email envoyé à {self.s.email_to}")
+
+            for address, name in recipients:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = formataddr((self.s.email_from_name, self.s.email_from))
+                msg["To"] = formataddr((name, address)) if name else address
+                msg.attach(MIMEText(html, "html", "utf-8"))
+                server.send_message(msg)
+                sent_to.append(address)
+
+        logger.info(f"Email envoyé à {len(sent_to)} destinataire(s) : {', '.join(sent_to)}")
+        return sent_to

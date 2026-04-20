@@ -140,3 +140,25 @@ class PipelineRun(Base):
     brief_id: Mapped[int | None] = mapped_column(ForeignKey("briefs.id", ondelete="SET NULL"))
     error: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Recipient(Base):
+    """Destinataire d'un brief (email ou WhatsApp).
+
+    Géré via l'API admin (`/api/recipients`) pour pouvoir ajouter/supprimer
+    des destinataires sans redéployer. Un même destinataire peut être désactivé
+    temporairement via `enabled=false` plutôt que supprimé (garde l'historique).
+    """
+    __tablename__ = "recipients"
+    __table_args__ = (
+        Index("ix_recipients_channel_address", "channel", "address", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    channel: Mapped[str] = mapped_column(String(16), index=True)  # "email" | "whatsapp"
+    address: Mapped[str] = mapped_column(String(255))  # email ou numéro E.164
+    name: Mapped[str | None] = mapped_column(String(128))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
