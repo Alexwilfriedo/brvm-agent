@@ -1,0 +1,335 @@
+{#
+  Template email — Brief BRVM
+  =============================
+
+  Charte graphique :
+    - Typographie : Lexend (Google Fonts) avec fallback system stack
+      puis 'Segoe UI'/Arial (MSO / Outlook qui ignore @import)
+    - Palette : navy #0A2540 (primaire), or #C9A961 (accent sobre),
+                 blanc cassé #FAFAF7 (fond), slate #1E293B (texte)
+    - Max width 640px, mobile-first, aucun JS, aucun SVG
+
+  Compatibilité email :
+    - Styles inline + <style> en tête pour responsive
+    - <link> Google Fonts pour Apple Mail / iOS / Gmail web
+    - MSO conditional pour Outlook (tombe sur Segoe UI)
+    - Tables pour la structure critique (Outlook)
+#}
+{% macro quote_table(title, rows, color) %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:6px;">
+<tr>
+<td style="padding:10px 14px 6px;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:{{ color }};font-weight:700;">
+  {{ title }}
+</td>
+</tr>
+{% for q in rows[:5] %}
+<tr>
+<td style="padding:6px 14px;border-top:1px solid #E2E8F0;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+  <tr>
+  <td style="font-size:12px;color:#1E293B;font-weight:600;">{{ q.ticker }}</td>
+  <td align="right" style="font-size:12px;color:{{ color }};font-weight:600;font-variant-numeric:tabular-nums;">
+    {{ '{:+.2f}'.format(q.var_pct|float) }}%
+  </td>
+  </tr>
+  </table>
+</td>
+</tr>
+{% endfor %}
+</table>
+{% endmacro %}
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="fr">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light">
+<title>{{ subject }}</title>
+{# Lexend : Google Fonts via <link> (Apple Mail, iOS, Gmail web) + <style> @import (fallback) #}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700&display=swap');
+
+  /* Reset minimum pour clients email */
+  body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+  table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+  img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+  body { margin: 0 !important; padding: 0 !important; width: 100% !important; background: #FAFAF7; }
+
+  /* Typo — stack Lexend avec fallback solide pour Outlook */
+  body, td, div, p, span, a, li, h1, h2, h3, h4 {
+    font-family: 'Lexend', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  }
+
+  /* Mobile */
+  @media only screen and (max-width: 640px) {
+    .container { width: 100% !important; max-width: 100% !important; }
+    .px-outer { padding-left: 20px !important; padding-right: 20px !important; }
+    .stack-mobile { display: block !important; width: 100% !important; }
+    .hide-mobile { display: none !important; }
+    .h1 { font-size: 26px !important; line-height: 1.25 !important; }
+  }
+</style>
+{# Fallback Outlook — MSO ne supporte pas Google Fonts, tombe sur Segoe UI / Arial #}
+<!--[if mso]>
+<style type="text/css">
+  body, td, div, p, span, a, li, h1, h2, h3, h4 { font-family: 'Segoe UI', Arial, sans-serif !important; }
+</style>
+<![endif]-->
+</head>
+<body style="margin:0;padding:0;background:#FAFAF7;font-family:'Lexend',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#1E293B;">
+<!-- Preheader (aperçu inbox) -->
+<div style="display:none;font-size:1px;color:#FAFAF7;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">
+{{ preheader }}
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#FAFAF7;">
+<tr>
+<td align="center" class="px-outer" style="padding:32px 16px;">
+
+  <table role="presentation" class="container" width="640" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;width:100%;background:#ffffff;border:1px solid #E2E8F0;border-radius:12px;overflow:hidden;">
+
+    {# ============ HEADER ============ #}
+    <tr>
+      <td style="padding:28px 32px 20px;border-bottom:1px solid #E2E8F0;background:#0A2540;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td align="left" valign="middle">
+              <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:13px;letter-spacing:0.22em;color:#C9A961;text-transform:uppercase;font-weight:600;">
+                BRVM · Morning Brief
+              </div>
+              <div style="margin-top:6px;font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:22px;color:#ffffff;line-height:1.2;" class="h1">
+                {{ date_str }}
+              </div>
+            </td>
+            <td align="right" valign="top" class="hide-mobile" style="font-size:11px;color:#94A3B8;letter-spacing:0.08em;text-transform:uppercase;">
+              Édition {{ edition_num }}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+
+    {# ============ MARKET REGIME BADGE ============ #}
+    {% if brief.market_regime %}
+    <tr>
+      <td style="padding:16px 32px 0;">
+        <span style="display:inline-block;padding:6px 12px;background:{{ regime.bg }};color:{{ regime.fg }};border-radius:4px;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;font-weight:700;">
+          Régime · {{ regime.label }}
+        </span>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ MARKET SUMMARY ============ #}
+    {% if brief.market_summary %}
+    <tr>
+      <td style="padding:20px 32px 0;">
+        <div style="border-left:3px solid #C9A961;padding:4px 0 4px 16px;">
+          <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:12px;color:#64748B;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:6px;">
+            Résumé de marché
+          </div>
+          <div style="font-size:15px;line-height:1.6;color:#1E293B;">
+            {{ brief.market_summary }}
+          </div>
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ TOP GAINERS / LOSERS ============ #}
+    {% if snapshot and (snapshot.top_gainers or snapshot.top_losers) %}
+    <tr>
+      <td style="padding:28px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:12px;color:#64748B;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:12px;">
+          Séance précédente
+        </div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td class="stack-mobile" width="50%" valign="top" style="padding-right:8px;">
+              {{ quote_table('Hausses', snapshot.top_gainers, '#059669') }}
+            </td>
+            <td class="stack-mobile" width="50%" valign="top" style="padding-left:8px;">
+              {{ quote_table('Baisses', snapshot.top_losers, '#DC2626') }}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ OPPORTUNITIES ============ #}
+    {% if brief.opportunities %}
+    <tr>
+      <td style="padding:28px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:20px;color:#0A2540;margin-bottom:4px;">
+          Opportunités du jour
+        </div>
+        <div style="font-size:12px;color:#64748B;margin-bottom:16px;">
+          {{ brief.opportunities|length }} idée{{ 's' if brief.opportunities|length > 1 else '' }} retenue{{ 's' if brief.opportunities|length > 1 else '' }} · Conviction &gt;= 1
+        </div>
+      </td>
+    </tr>
+    {% for o in brief.opportunities %}
+    {% set dir_style = direction_style(o.direction) %}
+    <tr>
+      <td style="padding:0 32px 16px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #E2E8F0;border-radius:8px;border-left:4px solid {{ dir_style.accent }};">
+          <tr>
+            <td style="padding:18px 20px 14px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td valign="top">
+                    <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:18px;color:#0A2540;line-height:1.2;">
+                      {{ o.name or o.ticker }}
+                      <span style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:12px;color:#64748B;letter-spacing:0.06em;font-weight:600;margin-left:6px;">{{ o.ticker }}</span>
+                    </div>
+                    <div style="margin-top:4px;font-size:12px;color:#64748B;">
+                      Conviction {{ '●' * o.conviction }}{{ '○' * (5 - o.conviction) }}
+                      {% if o.time_horizon %} · Horizon {{ o.time_horizon }}{% endif %}
+                      {% if o.entry_zone_fcfa %} · Zone {{ o.entry_zone_fcfa }} FCFA{% endif %}
+                    </div>
+                  </td>
+                  <td align="right" valign="top" style="white-space:nowrap;">
+                    <span style="display:inline-block;padding:4px 12px;background:{{ dir_style.bg }};color:{{ dir_style.fg }};border-radius:3px;font-size:11px;letter-spacing:0.14em;text-transform:uppercase;font-weight:700;">
+                      {{ dir_style.label }}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+
+              {% if o.thesis %}
+              <p style="margin:14px 0 0;font-size:14px;line-height:1.6;color:#1E293B;">{{ o.thesis }}</p>
+              {% endif %}
+
+              {% if o.signals %}
+              <div style="margin-top:14px;">
+                <div style="font-size:11px;letter-spacing:0.12em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Signaux</div>
+                <ul style="margin:0;padding-left:18px;font-size:13px;color:#1E293B;line-height:1.55;">
+                  {% for s in o.signals %}<li>{{ s }}</li>{% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if o.catalysts %}
+              <div style="margin-top:12px;">
+                <div style="font-size:11px;letter-spacing:0.12em;color:#C9A961;text-transform:uppercase;font-weight:700;margin-bottom:4px;">Catalyseurs</div>
+                <ul style="margin:0;padding-left:18px;font-size:13px;color:#1E293B;line-height:1.55;">
+                  {% for c in o.catalysts %}<li>{{ c }}</li>{% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if o.risks %}
+              <div style="margin-top:12px;">
+                <div style="font-size:11px;letter-spacing:0.12em;color:#991B1B;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Risques</div>
+                <ul style="margin:0;padding-left:18px;font-size:13px;color:#7F1D1D;line-height:1.55;">
+                  {% for r in o.risks %}<li>{{ r }}</li>{% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+
+              {% if o.invalidation %}
+              <div style="margin-top:14px;padding:10px 12px;background:#FEF3C7;border-radius:4px;font-size:12px;line-height:1.5;color:#78350F;">
+                <strong style="letter-spacing:0.08em;text-transform:uppercase;font-size:10px;">Invalidation · </strong>
+                {{ o.invalidation }}
+              </div>
+              {% endif %}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+    {% endfor %}
+    {% endif %}
+
+    {# ============ ALERTS ============ #}
+    {% if brief.alerts %}
+    <tr>
+      <td style="padding:20px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:16px;color:#0A2540;margin-bottom:10px;">
+          ⚠ Alertes à surveiller
+        </div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:6px;">
+          <tr>
+            <td style="padding:14px 18px;">
+              <ul style="margin:0;padding-left:18px;font-size:13px;color:#78350F;line-height:1.7;">
+                {% for a in brief.alerts %}<li>{{ a }}</li>{% endfor %}
+              </ul>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ WATCHLIST ============ #}
+    {% if brief.watchlist_updates %}
+    <tr>
+      <td style="padding:20px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:14px;color:#0A2540;margin-bottom:8px;">
+          Watchlist · évolutions
+        </div>
+        <ul style="margin:0;padding-left:18px;font-size:13px;color:#334155;line-height:1.65;">
+          {% for w in brief.watchlist_updates %}<li>{{ w }}</li>{% endfor %}
+        </ul>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ SKIP REASONS ============ #}
+    {% if brief.skip_reasons and not brief.opportunities %}
+    <tr>
+      <td style="padding:20px 32px 0;">
+        <div style="padding:16px 20px;background:#F1F5F9;border-left:3px solid #64748B;border-radius:4px;">
+          <div style="font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:#475569;font-weight:700;margin-bottom:6px;">
+            Note de l'analyste
+          </div>
+          <div style="font-size:13px;line-height:1.65;color:#334155;">
+            {{ brief.skip_reasons }}
+          </div>
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ ERROR BANNER ============ #}
+    {% if brief.is_error %}
+    <tr>
+      <td style="padding:20px 32px 0;">
+        <div style="padding:14px 18px;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:6px;color:#7F1D1D;font-size:13px;line-height:1.5;">
+          ⚠ La synthèse automatique a échoué aujourd'hui. Brief partiel envoyé pour traçabilité. Voir logs pour détail.
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ FOOTER ============ #}
+    <tr>
+      <td style="padding:32px;border-top:1px solid #E2E8F0;background:#F8FAFC;">
+        <div style="font-size:11px;line-height:1.65;color:#64748B;">
+          Brief généré automatiquement par <strong style="color:#0A2540;">BRVM Agent</strong> — aide à la décision uniquement.
+          Aucune recommandation d'investissement au sens réglementaire CREPMF.
+          Les performances passées ne préjugent pas des performances futures.
+          Consulte toujours un conseiller financier agréé avant d'engager des fonds.
+        </div>
+      </td>
+    </tr>
+
+  </table>
+
+  {# Tagline sous le container #}
+  <div style="margin-top:18px;font-size:11px;color:#94A3B8;letter-spacing:0.06em;">
+    {{ date_str }} · Abidjan · {{ app_version }}
+  </div>
+
+</td>
+</tr>
+</table>
+
+</body>
+</html>

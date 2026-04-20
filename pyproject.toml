@@ -1,0 +1,57 @@
+[project]
+name = "brvm-agent"
+version = "0.1.0"
+description = "Agent de veille et d'analyse automatisée de la BRVM."
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "dist", "build"]
+
+[tool.ruff.lint]
+select = [
+  "E",    # pycodestyle errors
+  "F",    # pyflakes
+  "W",    # pycodestyle warnings
+  "I",    # isort
+  "B",    # flake8-bugbear
+  "UP",   # pyupgrade
+  "SIM",  # simplify
+  "C4",   # comprehensions
+  "DTZ",  # datetime tz-aware
+  "RET",  # return
+  "PT",   # pytest-style
+]
+ignore = [
+  "E501",  # line length handled by formatter
+  "B008",  # function-calls-in-default-argument (FastAPI `Depends()` idiomatic)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SIM117"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = ["tests/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+markers = [
+  "unit: tests unitaires rapides et isolés",
+  "integration: tests nécessitant une DB ou service externe",
+]

@@ -1,0 +1,132 @@
+"""Livraison email via SMTP Brevo.
+
+Le rendu HTML est délégué à un template Jinja2 (`templates/brief_email.html.j2`)
+pour pouvoir itérer sur la charte graphique sans toucher au code Python.
+
+Preview : un brief d'exemple est exposé via `GET /api/briefs/preview` pour
+valider la charte sans envoyer d'email (cf. `src/api/briefs.py`).
+"""
+from __future__ import annotations
+
+import logging
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr
+from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from ..analysis.schemas import BriefPayload
+from ..config import get_settings
+
+logger = logging.getLogger(__name__)
+
+_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_env = Environment(
+    loader=FileSystemLoader(_TEMPLATE_DIR),
+    autoescape=select_autoescape(["html", "j2"]),
+    trim_blocks=True,
+    lstrip_blocks=True,
+)
+
+
+# --- Design tokens (charte graphique) ---------------------------------------
+
+DIRECTION_STYLES: dict[str, dict[str, str]] = {
+    "buy":    {"label": "Achat",      "bg": "#059669", "fg": "#FFFFFF", "accent": "#059669"},
+    "watch":  {"label": "Surveiller", "bg": "#D97706", "fg": "#FFFFFF", "accent": "#D97706"},
+    "hold":   {"label": "Conserver",  "bg": "#475569", "fg": "#FFFFFF", "accent": "#475569"},
+    "reduce": {"label": "Alléger",    "bg": "#B45309", "fg": "#FFFFFF", "accent": "#B45309"},
+    "avoid":  {"label": "Éviter",     "bg": "#DC2626", "fg": "#FFFFFF", "accent": "#DC2626"},
+}
+
+REGIME_STYLES: dict[str, dict[str, str]] = {
+    "trend_up":     {"label": "Tendance haussière", "bg": "#DCFCE7", "fg": "#14532D"},
+    "trend_down":   {"label": "Tendance baissière", "bg": "#FEE2E2", "fg": "#7F1D1D"},
+    "range":        {"label": "Range",              "bg": "#F1F5F9", "fg": "#334155"},
+    "risk_off":     {"label": "Risk-off",           "bg": "#FEF3C7", "fg": "#78350F"},
+    "event_driven": {"label": "Event-driven",       "bg": "#E0E7FF", "fg": "#312E81"},
+    "illiquid":     {"label": "Illiquide",          "bg": "#FFEDD5", "fg": "#7C2D12"},
+}
+
+
+def _direction_style(direction: str | None) -> dict[str, str]:
+    return DIRECTION_STYLES.get(direction or "watch", DIRECTION_STYLES["watch"])
+
+
+def _regime_style(regime: str | None) -> dict[str, str] | None:
+    if not regime:
+        return None
+    return REGIME_STYLES.get(regime)
+
+
+# --- Rendu ------------------------------------------------------------------
+
+def render_email_html(
+    brief_raw: dict,
+    date_str: str,
+    *,
+    market_snapshot: dict | None = None,
+    edition_num: int | str = "001",
+    app_version: str = "v0.1",
+) -> tuple[str, str]:
+    """Retourne (sujet, html) à partir du dict JSON du brief.
+
+    Args:
+        brief_raw: payload brut produit par Opus (synthesis.py).
+        date_str: date formatée en français ("Lundi 21 avril 2026").
+        market_snapshot: snapshot des cotations (top gainers/losers).
+        edition_num: numéro d'édition affiché dans l'en-tête.
+        app_version: affiché en pied de page.
+    """
+    brief = BriefPayload.from_raw(brief_raw)
+
+    subject = f"Brief BRVM · {date_str}"
+    if brief.is_error:
+        subject = f"[DEGRADÉ] {subject}"
+    elif not brief.opportunities:
+        subject += " · aucun signal fort"
+    else:
+        top = brief.opportunities[0]
+        subject += f" · {top.ticker} {_direction_style(top.direction)['label'].lower()}"
+
+    preheader = (
+        brief.market_summary[:120]
+        if brief.market_summary
+        else f"{len(brief.opportunities)} opportunité(s), {len(brief.alerts)} alerte(s)"
+    )
+
+    template = _env.get_template("brief_email.html.j2")
+    html = template.render(
+        subject=subject,
+        preheader=preheader,
+        date_str=date_str,
+        edition_num=edition_num,
+        app_version=app_version,
+        brief=brief,
+        snapshot=market_snapshot,
+        regime=_regime_style(brief.market_regime),
+        direction_style=_direction_style,
+    )
+    return subject, html
+
+
+# --- SMTP -------------------------------------------------------------------
+
+class EmailSender:
+    def __init__(self):
+        self.s = get_settings()
+
+    def send(self, subject: str, html: str) -> None:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = formataddr((self.s.email_from_name, self.s.email_from))
+        msg["To"] = self.s.email_to
+        msg.attach(MIMEText(html, "html", "utf-8"))
+
+        with smtplib.SMTP(self.s.brevo_smtp_host, self.s.brevo_smtp_port) as server:
+            server.starttls()
+            server.login(self.s.brevo_smtp_user, self.s.brevo_smtp_password)
+            server.send_message(msg)
+        logger.info(f"Email envoyé à {self.s.email_to}")
