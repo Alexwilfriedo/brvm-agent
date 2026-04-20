@@ -1,0 +1,90 @@
+{#
+  Email magic link — charte cohérente avec brief_email.html.j2
+#}
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Connexion BRVM Agent</title>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+  body { margin: 0 !important; padding: 0 !important; background: #FAFAF7; }
+  @media only screen and (max-width: 640px) {
+    .container { width: 100% !important; }
+    .px-outer { padding-left: 16px !important; padding-right: 16px !important; }
+  }
+</style>
+</head>
+<body style="margin:0;padding:0;background:#FAFAF7;font-family:'Lexend',-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;color:#1E293B;">
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#FAFAF7;">
+<tr>
+<td align="center" class="px-outer" style="padding:40px 16px;">
+
+  <table role="presentation" class="container" width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;background:#FFFFFF;border:1px solid #E2E8F0;border-radius:12px;overflow:hidden;">
+
+    <tr>
+      <td style="padding:28px 32px;background:#0A2540;">
+        <div style="font-size:12px;letter-spacing:0.22em;color:#C9A961;text-transform:uppercase;font-weight:600;">
+          BRVM · Agent
+        </div>
+        <div style="margin-top:6px;font-size:22px;color:#ffffff;font-weight:600;">
+          Connexion à la console
+        </div>
+      </td>
+    </tr>
+
+    <tr>
+      <td style="padding:32px;">
+        <p style="margin:0 0 16px;font-size:15px;line-height:1.6;">
+          Bonjour{% if name %} {{ name }}{% endif %},
+        </p>
+        <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#334155;">
+          Tu as demandé à te connecter à la console d'administration BRVM Agent.
+          Clique sur le bouton ci-dessous pour ouvrir ta session.
+        </p>
+
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
+          <tr>
+            <td>
+              <a href="{{ link }}" target="_blank"
+                 style="display:inline-block;padding:12px 28px;background:#C9A961;color:#0A2540;text-decoration:none;font-size:14px;font-weight:600;border-radius:6px;letter-spacing:0.02em;">
+                Ouvrir ma session
+              </a>
+            </td>
+          </tr>
+        </table>
+
+        <p style="margin:0 0 8px;font-size:12px;color:#64748B;">
+          Ou copie ce lien dans ton navigateur :
+        </p>
+        <p style="margin:0 0 20px;font-size:11px;color:#475569;word-break:break-all;font-family:'JetBrains Mono','Courier New',monospace;background:#F8FAFC;padding:10px 12px;border-radius:4px;border:1px solid #E2E8F0;">
+          {{ link }}
+        </p>
+
+        <div style="margin-top:24px;padding:12px 16px;background:#FFFBEB;border:1px solid #FDE68A;border-radius:6px;font-size:12px;color:#78350F;line-height:1.5;">
+          Ce lien expire dans <strong>{{ ttl_minutes }} minutes</strong> et ne peut être utilisé qu'une seule fois.
+          Si tu n'as pas demandé cette connexion, ignore simplement cet email — aucune action
+          n'a été effectuée.
+        </div>
+
+        <p style="margin:24px 0 0;font-size:12px;color:#64748B;">
+          Demande émise depuis
+          <span style="font-family:'JetBrains Mono',monospace;">{{ ip or 'IP inconnue' }}</span>.
+        </p>
+      </td>
+    </tr>
+
+    <tr>
+      <td style="padding:20px 32px;border-top:1px solid #E2E8F0;background:#F8FAFC;font-size:11px;color:#64748B;line-height:1.5;">
+        Email transactionnel — BRVM Agent, console d'administration.
+      </td>
+    </tr>
+  </table>
+</td>
+</tr>
+</table>
+</body>
+</html>
