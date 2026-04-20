@@ -30,6 +30,10 @@ _history: dict[int, deque] = {}
 # Subscribers actifs : run_id → liste de Queue[Event]
 _subscribers: dict[int, list[queue.Queue]] = {}
 
+# Timers de purge trackés pour pouvoir les annuler au shutdown — sinon on
+# fuit un thread par run pendant 5 minutes.
+_purge_timers: dict[int, threading.Timer] = {}
+
 _lock = threading.Lock()
 
 
@@ -76,12 +80,39 @@ def unsubscribe(run_id: int, q: queue.Queue) -> None:
             _subscribers.pop(run_id, None)
 
 
-def mark_run_done(run_id: int) -> None:
-    """Envoie un event `run.closed` pour signaler aux subscribers de fermer.
+def _purge_history(run_id: int) -> None:
+    """Purge atomique d'un run de l'historique + nettoie le tracker de timer."""
+    with _lock:
+        _history.pop(run_id, None)
+        _purge_timers.pop(run_id, None)
 
-    Les subscribers peuvent ensuite se déconnecter proprement. Le buffer
-    d'historique est conservé 5 minutes au cas où un client se reconnecte.
+
+def mark_run_done(run_id: int) -> None:
+    """Envoie un event `run.closed` + programme la purge de l'historique.
+
+    Le buffer est conservé 5 min pour permettre à un client qui se reconnecte
+    de rejouer la fin du run. Le timer est **tracké** pour pouvoir l'annuler
+    au shutdown (sinon fuite d'un thread par run pendant 5 minutes).
     """
     publish(run_id, "run.closed")
-    # Purge différée (threading.Timer plutôt que background worker — léger)
-    threading.Timer(300, lambda: _history.pop(run_id, None)).start()
+    timer = threading.Timer(300, _purge_history, args=(run_id,))
+    timer.daemon = True  # le thread n'empêche pas l'arrêt de l'app
+    with _lock:
+        # Si un timer existait déjà (double mark_run_done), on l'annule
+        previous = _purge_timers.pop(run_id, None)
+        if previous:
+            previous.cancel()
+        _purge_timers[run_id] = timer
+    timer.start()
+
+
+def shutdown() -> None:
+    """Annule tous les timers de purge en cours (appelé depuis le lifespan).
+
+    Sans ça, un SIGTERM pendant les 5 min post-run laisse le thread vivre
+    jusqu'à son échéance même si l'app s'arrête.
+    """
+    with _lock:
+        for timer in _purge_timers.values():
+            timer.cancel()
+        _purge_timers.clear()

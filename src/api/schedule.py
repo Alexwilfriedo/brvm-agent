@@ -2,7 +2,7 @@
 from datetime import UTC, datetime
 
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 
@@ -19,6 +19,7 @@ class ScheduleOut(BaseModel):
     enabled: bool
     updated_at: datetime
     next_run: str | None = None
+    scheduler_running: bool = False
 
 
 class SchedulePatch(BaseModel):
@@ -46,11 +47,15 @@ def get_schedule():
             raise HTTPException(status_code=404, detail="Config inexistante")
         job = scheduler.scheduler.get_job("daily_brief")
         next_run = str(job.next_run_time) if job else None
+        # "Running" = APScheduler actif ET un job daily_brief est enregistré.
+        # Sans le job, le cron config peut exister mais rien ne se déclencherait.
+        is_running = bool(scheduler.scheduler.running and job)
         return ScheduleOut(
             cron_expression=cfg.cron_expression,
             enabled=cfg.enabled,
             updated_at=cfg.updated_at,
             next_run=next_run,
+            scheduler_running=is_running,
         )
 
 
@@ -73,7 +78,28 @@ def update_schedule(body: SchedulePatch):
 
 
 @router.post("/run-now", status_code=202)
-def run_now():
-    """Déclenche une exécution immédiate. Ne bloque pas."""
-    get_scheduler().trigger_now()
-    return {"status": "scheduled", "message": "Pipeline déclenché en arrière-plan"}
+def run_now(
+    force: bool = Query(
+        False,
+        description=(
+            "True pour régénérer un brief déjà existant aujourd'hui "
+            "(créera une révision 2+). Par défaut, le run skippe si un brief "
+            "du jour existe déjà."
+        ),
+    ),
+):
+    """Déclenche une exécution immédiate. Ne bloque pas.
+
+    Comportement par défaut (force=False) : idempotent — si un brief existe
+    déjà pour la date du jour, le run skippe avec `status=already_generated`.
+    Passer `?force=true` pour forcer la régénération (= révision).
+    """
+    get_scheduler().trigger_now(force=force)
+    return {
+        "status": "scheduled",
+        "force": force,
+        "message": (
+            "Régénération forcée en arrière-plan" if force
+            else "Pipeline déclenché (idempotent — skip si brief du jour existe)"
+        ),
+    }

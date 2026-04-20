@@ -55,6 +55,20 @@ class Settings(BaseSettings):
     # Admin — OBLIGATOIRE en prod, aucun default de secours
     admin_api_token: str
 
+    # Auth magic link + JWT session
+    # OBLIGATOIRE et DISTINCT de admin_api_token : permet de rotater l'un sans
+    # invalider l'autre. Génération : `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+    # Voir ADR-003 pour l'historique (ancien mode : dérivation du admin token).
+    jwt_secret: str
+    jwt_expires_days: int = 7
+    magic_link_ttl_minutes: int = 15
+    # URL publique du front (lien magique : {frontend_url}/auth/verify?token=...)
+    frontend_url: str = "http://localhost:5173"
+    # CORS : liste CSV des origines autorisées à appeler l'API (console admin)
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # Seed-only : si défini ET users vide au 1er boot, crée le 1er admin.
+    initial_admin_email: str = ""
+
     # Observabilité (optionnel)
     sentry_dsn: str = ""
     sentry_environment: str = "production"
@@ -63,6 +77,18 @@ class Settings(BaseSettings):
     # Misc
     log_level: str = "INFO"
     news_lookback_hours: int = 36
+
+    # --- Propriétés dérivées -------------------------------------------
+
+    @property
+    def effective_jwt_secret(self) -> str:
+        """JWT secret effectif. Conservé pour compat des call-sites ; renvoie
+        désormais toujours `self.jwt_secret` (validé par ailleurs)."""
+        return self.jwt_secret
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @field_validator("admin_api_token")
     @classmethod
@@ -74,6 +100,30 @@ class Settings(BaseSettings):
             )
         if len(v) < 24:
             raise ValueError("ADMIN_API_TOKEN trop court (minimum 24 caractères).")
+        return v
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def _validate_jwt_secret(cls, v: str) -> str:
+        if not v or v.strip() in {"change-me", "change-me-to-a-long-random-string"}:
+            raise ValueError(
+                "JWT_SECRET doit être défini avec une valeur non-placeholder, "
+                "indépendante de ADMIN_API_TOKEN. Génère : "
+                "`python -c 'import secrets; print(secrets.token_urlsafe(48))'`."
+            )
+        if len(v) < 32:
+            raise ValueError("JWT_SECRET trop court (minimum 32 caractères).")
+        return v
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def _jwt_secret_must_differ_from_admin_token(cls, v: str, info) -> str:
+        admin = info.data.get("admin_api_token")
+        if admin and v == admin:
+            raise ValueError(
+                "JWT_SECRET doit être DISTINCT de ADMIN_API_TOKEN — permet de "
+                "rotater l'un sans invalider l'autre (voir ADR-003)."
+            )
         return v
 
 

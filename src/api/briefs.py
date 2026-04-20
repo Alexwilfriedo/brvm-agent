@@ -3,11 +3,12 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 
 from ..database import get_session
 from ..models import Brief
 from .deps import require_admin
+from .pagination import DEFAULT_LIMIT, PaginatedResponse, ilike_any, paginate
 
 router = APIRouter(prefix="/api/briefs", tags=["briefs"], dependencies=[Depends(require_admin)])
 
@@ -31,6 +32,8 @@ class BriefSummaryOut(BaseModel):
     whatsapp_sent: bool
     delivery_status: str
     signals_count: int
+    revision: int = 1
+    revised_at: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -46,29 +49,90 @@ class BriefDetailOut(BaseModel):
     whatsapp_sent: bool
     delivery_status: str
     delivery_errors: str | None
+    revision: int = 1
+    revised_at: datetime | None = None
 
     class Config:
         from_attributes = True
 
 
-@router.get("", response_model=list[BriefSummaryOut])
-def list_briefs(limit: int = Query(30, ge=1, le=200)):
+@router.get("", response_model=PaginatedResponse[BriefSummaryOut])
+def list_briefs(
+    q: str | None = Query(None, description="Recherche fuzzy dans summary"),
+    delivery_status: str | None = Query(None),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    from sqlalchemy.orm import selectinload
     with get_session() as s:
-        briefs = s.execute(
-            select(Brief).order_by(Brief.brief_date.desc()).limit(limit)
-        ).scalars().all()
-        return [
-            BriefSummaryOut(
-                id=b.id,
-                brief_date=b.brief_date,
-                summary_markdown=b.summary_markdown,
-                email_sent=b.email_sent,
-                whatsapp_sent=b.whatsapp_sent,
-                delivery_status=b.delivery_status,
-                signals_count=len(b.signals),
-            )
-            for b in briefs
-        ]
+        stmt = (
+            select(Brief)
+            .options(selectinload(Brief.signals))  # évite N+1 sur signals_count
+            .order_by(Brief.brief_date.desc())
+        )
+        if delivery_status:
+            stmt = stmt.where(Brief.delivery_status == delivery_status)
+        if q:
+            stmt = stmt.where(ilike_any([cast(Brief.summary_markdown, String)], q))
+        items, total = paginate(s, stmt, limit=limit, offset=offset)
+        return PaginatedResponse[BriefSummaryOut](
+            items=[
+                BriefSummaryOut(
+                    id=b.id,
+                    brief_date=b.brief_date,
+                    summary_markdown=b.summary_markdown,
+                    email_sent=b.email_sent,
+                    whatsapp_sent=b.whatsapp_sent,
+                    delivery_status=b.delivery_status,
+                    signals_count=len(b.signals),
+                    revision=b.revision,
+                    revised_at=b.revised_at,
+                )
+                for b in items
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+
+@router.get("/today")
+def get_today_brief():
+    """Brief du jour (date calendaire locale UTC) ou `null`.
+
+    Utilisé par le dashboard pour afficher le "signal fort du jour" sans
+    parser la liste paginée côté front. Renvoie `null` si aucun brief
+    n'existe pour aujourd'hui.
+    """
+    from datetime import UTC, datetime, timedelta
+    from sqlalchemy.orm import selectinload
+    now = datetime.now(UTC)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+    with get_session() as s:
+        brief = s.execute(
+            select(Brief)
+            .options(selectinload(Brief.signals))
+            .where(Brief.brief_date >= day_start)
+            .where(Brief.brief_date < day_end)
+            .order_by(Brief.revision.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if not brief:
+            return None
+        return BriefDetailOut(
+            id=brief.id,
+            brief_date=brief.brief_date,
+            summary_markdown=brief.summary_markdown,
+            payload=brief.payload,
+            signals=[SignalOut.model_validate(sig) for sig in brief.signals],
+            email_sent=brief.email_sent,
+            whatsapp_sent=brief.whatsapp_sent,
+            delivery_status=brief.delivery_status,
+            delivery_errors=brief.delivery_errors,
+            revision=brief.revision,
+            revised_at=brief.revised_at,
+        )
 
 
 @router.get("/{brief_id}", response_model=BriefDetailOut)
@@ -87,4 +151,6 @@ def get_brief(brief_id: int):
             whatsapp_sent=brief.whatsapp_sent,
             delivery_status=brief.delivery_status,
             delivery_errors=brief.delivery_errors,
+            revision=brief.revision,
+            revised_at=brief.revised_at,
         )

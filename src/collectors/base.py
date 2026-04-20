@@ -17,14 +17,22 @@ class NewsItem:
 
 @dataclass
 class QuoteItem:
+    """Cotation remontée par un collecteur.
+
+    `country` : code pays UEMOA (ci/sn/tg/bj/ml/ne/bf), utile pour l'URL source.
+    `extras`  : métriques secondaires (open/high/low/prev, RSI, beta, PER,
+                dividende, capi…) — schéma libre selon le collecteur.
+    """
     ticker: str
     name: str
     sector: str = ""
+    country: str | None = None
     close_price: float = 0.0
     variation_pct: float = 0.0
     volume: int = 0
     value_traded: float = 0.0
     quote_date: datetime | None = None
+    extras: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -49,7 +57,12 @@ class Collector(ABC):
         self.config = config or {}
 
     @abstractmethod
-    def collect(self) -> CollectionResult:
+    def collect(self, run_id: int | None = None) -> CollectionResult:
         """Récupère les données. Ne lève PAS d'exception — les erreurs
-        sont retournées dans CollectionResult.errors."""
+        sont retournées dans CollectionResult.errors.
+
+        `run_id` permet aux collecteurs d'émettre des events SSE de
+        progression. Optionnel : les collecteurs qui n'en ont pas besoin
+        l'ignorent.
+        """
         raise NotImplementedError

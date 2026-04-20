@@ -107,12 +107,23 @@
               </div>
             </td>
             <td align="right" valign="top" class="hide-mobile" style="font-size:11px;color:#94A3B8;letter-spacing:0.08em;text-transform:uppercase;">
-              Édition {{ edition_num }}
+              Édition {{ edition_num }}{% if revision and revision > 1 %} · Rév. {{ revision }}{% endif %}
             </td>
           </tr>
         </table>
       </td>
     </tr>
+
+    {# ============ REVISION BANNER ============ #}
+    {% if revision and revision > 1 %}
+    <tr>
+      <td style="padding:16px 32px 0;">
+        <div style="padding:10px 14px;background:#FEF3C7;border:1px solid #FDE68A;border-radius:4px;font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:12px;color:#78350F;line-height:1.5;">
+          <strong style="letter-spacing:0.08em;text-transform:uppercase;">Révision {{ revision }}</strong> — Cette édition met à jour l'analyse textuelle publiée plus tôt aujourd'hui. <strong>Les signaux et niveaux de prix restent ceux de la 1re émission</strong> (intégrité historique).
+        </div>
+      </td>
+    </tr>
+    {% endif %}
 
     {# ============ MARKET REGIME BADGE ============ #}
     {% if brief.market_regime %}

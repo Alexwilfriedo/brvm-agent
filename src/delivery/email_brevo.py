@@ -74,6 +74,7 @@ def render_email_html(
     market_snapshot: dict | None = None,
     edition_num: int | str = "001",
     app_version: str = "v0.1",
+    revision: int = 1,
 ) -> tuple[str, str]:
     """Retourne (sujet, html) à partir du dict JSON du brief.
 
@@ -83,10 +84,13 @@ def render_email_html(
         market_snapshot: snapshot des cotations (top gainers/losers).
         edition_num: numéro d'édition affiché dans l'en-tête.
         app_version: affiché en pied de page.
+        revision: numéro de révision (1 = première émission). Si > 1, le
+                  sujet et le template mentionnent explicitement la révision.
     """
     brief = BriefPayload.from_raw(brief_raw)
 
-    subject = f"Brief BRVM · {date_str}"
+    subject_prefix = f"[Révision {revision}] " if revision > 1 else ""
+    subject = f"{subject_prefix}Brief BRVM · {date_str}"
     if brief.is_error:
         subject = f"[DEGRADÉ] {subject}"
     elif not brief.opportunities:
@@ -108,6 +112,7 @@ def render_email_html(
         date_str=date_str,
         edition_num=edition_num,
         app_version=app_version,
+        revision=revision,
         brief=brief,
         snapshot=market_snapshot,
         regime=_regime_style(brief.market_regime),

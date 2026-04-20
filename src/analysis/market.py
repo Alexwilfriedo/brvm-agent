@@ -69,12 +69,26 @@ def build_snapshot(session: Session, trading_date: datetime | None = None) -> di
     if trading_date is None:
         return {"trading_date": None, "quotes_count": 0}
 
-    # Normalise au jour
+    # Les Quote sont stockés avec un timestamp complet (heure du scrape), pas
+    # à minuit. On matche sur la **plage journalière** [day, day+1j) plutôt
+    # qu'en égalité stricte — sinon aucune ligne ne ressort.
     day = trading_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    next_day = day + timedelta(days=1)
 
+    # Ordre par **pertinence financière** : valeur échangée descendante (les
+    # titres actifs remontent), volume en tie-breaker, ticker alphabétique en
+    # dernier recours. Les titres non-tradés (value=0, volume=0) tombent en
+    # bas — comportement standard Sika Finance / Boursorama.
     quotes: list[Quote] = list(
         session.execute(
-            select(Quote).where(Quote.quote_date == day).order_by(Quote.ticker)
+            select(Quote)
+            .where(Quote.quote_date >= day)
+            .where(Quote.quote_date < next_day)
+            .order_by(
+                Quote.value_traded.desc(),
+                Quote.volume.desc(),
+                Quote.ticker.asc(),
+            )
         ).scalars().all()
     )
     rows = [_quote_to_row(q) for q in quotes]
@@ -87,25 +101,40 @@ def build_snapshot(session: Session, trading_date: datetime | None = None) -> di
     by_volume = sorted(rows, key=lambda r: r["volume"], reverse=True)
     by_value = sorted(rows, key=lambda r: r["value_traded"], reverse=True)
 
-    # Agrégats par secteur
+    # Agrégats par secteur — variation **pondérée par valeur échangée**
+    # (VWAP sectoriel). Évite qu'une petite illiquide à +5% fausse la moyenne
+    # sectorielle. Si tous les titres du secteur ont value_traded=0 (cas
+    # improbable), on retombe sur la moyenne arithmétique.
     sectors: dict[str, dict] = {}
     for r in rows:
         sec = r["sector"] or "Autres"
-        s = sectors.setdefault(sec, {"sector": sec, "count": 0, "sum_var": 0.0, "total_value": 0.0, "traded_count": 0})
-        s["count"] += 1
-        s["total_value"] += r["value_traded"]
+        bucket = sectors.setdefault(sec, {
+            "sector": sec, "count": 0,
+            "sum_var": 0.0, "sum_weighted_var": 0.0, "sum_weights": 0.0,
+            "total_value": 0.0, "traded_count": 0,
+        })
+        bucket["count"] += 1
+        bucket["total_value"] += r["value_traded"]
         if r["close_price"] > 0 and r["volume"] > 0:
-            s["sum_var"] += r["variation_pct"]
-            s["traded_count"] += 1
+            bucket["sum_var"] += r["variation_pct"]
+            bucket["sum_weighted_var"] += r["variation_pct"] * r["value_traded"]
+            bucket["sum_weights"] += r["value_traded"]
+            bucket["traded_count"] += 1
     by_sector = []
-    for s in sectors.values():
-        avg_var = round(s["sum_var"] / s["traded_count"], 3) if s["traded_count"] else 0.0
+    for bucket in sectors.values():
+        if bucket["sum_weights"] > 0:
+            avg_var = round(bucket["sum_weighted_var"] / bucket["sum_weights"], 3)
+        elif bucket["traded_count"]:
+            # Fallback moyenne arithmétique si aucune valeur échangée
+            avg_var = round(bucket["sum_var"] / bucket["traded_count"], 3)
+        else:
+            avg_var = 0.0
         by_sector.append({
-            "sector": s["sector"],
-            "count": s["count"],
-            "traded_count": s["traded_count"],
+            "sector": bucket["sector"],
+            "count": bucket["count"],
+            "traded_count": bucket["traded_count"],
             "avg_var_pct": avg_var,
-            "total_value": s["total_value"],
+            "total_value": bucket["total_value"],
         })
     by_sector.sort(key=lambda x: -x["total_value"])
 
@@ -208,6 +237,8 @@ def generate_analysis(
     if trading_date is None:
         return None
 
+    # Pour MarketAnalysis, on stocke `trading_date` à minuit (1 ligne/jour, non
+    # ambigu) — donc l'égalité stricte est correcte ici.
     day = trading_date.replace(hour=0, minute=0, second=0, microsecond=0)
 
     existing = session.execute(
@@ -282,19 +313,31 @@ def generate_analysis(
 _TICKERS_BY_CODE: dict[str, Listed] = {t.ticker: t for t in BRVM_TICKERS}
 
 
-def _perf_from_series(closes: list[float], days_ago: int) -> float | None:
-    """Perf % entre la dernière valeur et celle d'il y a `days_ago` points.
+def _perf_calendar(series: list[dict], calendar_days: int) -> float | None:
+    """Perf % entre la dernière clôture et la clôture ≤ (now - `calendar_days`).
 
-    On s'appuie sur l'index (une cotation par jour de bourse) plutôt que sur
-    la date calendaire — suffisamment précis pour afficher une perf.
+    On indexe sur la **date calendaire**, pas sur la position dans la série
+    filtrée — sinon sur un titre qui cote 1x/semaine, "perf 7j" = 5 séances
+    filtrées = ~5 semaines calendaires (bug connu des marchés illiquides BRVM).
+
+    Retourne `None` si pas assez d'historique ou si le close de référence est 0.
     """
-    if len(closes) <= days_ago:
+    if not series:
         return None
-    current = closes[-1]
-    past = closes[-1 - days_ago]
+    valid = [p for p in series if p.get("close") and p["close"] > 0]
+    if len(valid) < 2:
+        return None
+    last = valid[-1]
+    last_date = datetime.fromisoformat(last["date"])
+    target_date = last_date - timedelta(days=calendar_days)
+    # On cherche la dernière cotation ≤ target_date
+    past_candidates = [p for p in valid[:-1] if datetime.fromisoformat(p["date"]) <= target_date]
+    if not past_candidates:
+        return None
+    past = past_candidates[-1]["close"]
     if not past:
         return None
-    return round((current - past) / past * 100, 3)
+    return round((last["close"] - past) / past * 100, 2)
 
 
 def build_ticker_detail(
@@ -349,35 +392,66 @@ def build_ticker_detail(
 
     # Série + stats
     series: list[dict] = []
-    closes: list[float] = []
-    volumes: list[int] = []
+    # Extrêmes réels : max(high intraday, close) pour tenir compte des mèches
+    # qui dépassent le close. Si pas d'intraday scrapé, close est le fallback.
+    highs: list[float] = []
+    lows: list[float] = []
+    traded_volumes: list[int] = []  # volumes des SEULES séances tradées
+
     for q in rows:
         extras = q.extras or {}
+        open_p = extras.get("open_price")
+        high_p = extras.get("high_price")
+        low_p = extras.get("low_price")
+        prev_p = extras.get("previous_close")
         series.append({
             "date": q.quote_date.isoformat(),
             "close": q.close_price,
             "volume": q.volume,
             "variation_pct": q.variation_pct,
-            "open": extras.get("open_price"),
-            "high": extras.get("high_price"),
-            "low": extras.get("low_price"),
-            "previous_close": extras.get("previous_close"),
+            "open": open_p,
+            "high": high_p,
+            "low": low_p,
+            "previous_close": prev_p,
         })
-        if q.close_price and q.close_price > 0:
-            closes.append(q.close_price)
-        volumes.append(q.volume)
+        # Extrêmes : on combine close + high/low intraday si dispos
+        day_high = max(v for v in [q.close_price, high_p] if v and v > 0) if q.close_price > 0 else None
+        day_low = min(v for v in [q.close_price, low_p] if v and v > 0) if q.close_price > 0 else None
+        if day_high:
+            highs.append(day_high)
+        if day_low:
+            lows.append(day_low)
+        # Volume moyen : on **exclut** les jours non-tradés (volume=0) qui
+        # tireraient l'avg vers le bas sur les titres illiquides BRVM.
+        if q.volume > 0:
+            traded_volumes.append(q.volume)
+
+    # Fenêtre réelle = nb de jours calendaires couverts par `series` (borné
+    # par `days`). Pas 52 semaines sauf si l'appelant passe days=365.
+    window_label = f"{days}j" if days < 365 else "52s"
 
     stats: dict = {
         "series_days": len(series),
-        "high_52w": max(closes) if closes else None,
-        "low_52w": min(closes) if closes else None,
-        "avg_volume_30d": round(sum(volumes[-30:]) / max(1, len(volumes[-30:])))
-        if volumes else None,
-        # Perfs basées sur l'index (1 point par séance). Demande des données…
-        "perf_1d": _perf_from_series(closes, 1),
-        "perf_7d": _perf_from_series(closes, 5),   # ~5 séances de bourse/semaine
-        "perf_30d": _perf_from_series(closes, 22), # ~22 séances par mois
-        "perf_90d": _perf_from_series(closes, 66),
+        "window_days": days,
+        "high_window": max(highs) if highs else None,
+        "low_window": min(lows) if lows else None,
+        "window_label": window_label,
+        # Alias rétro-compat — mêmes valeurs, nom honnête via window_label
+        "high_52w": max(highs) if highs else None,
+        "low_52w": min(lows) if lows else None,
+        # Volume moyen **sur les séances tradées uniquement**, fenêtre glissante
+        # de 30 séances (pas 30 jours calendaires). Honnête sur la liquidité.
+        "avg_volume_30d": (
+            round(sum(traded_volumes[-30:]) / len(traded_volumes[-30:]))
+            if traded_volumes else None
+        ),
+        "traded_sessions_30d": min(len(traded_volumes), 30),
+        # Perfs **calendaires** : on cherche la séance ≤ today - N jours.
+        # Robuste aux tickers qui cotent épisodiquement (majorité BRVM).
+        "perf_1d": _perf_calendar(series, 1),
+        "perf_7d": _perf_calendar(series, 7),
+        "perf_30d": _perf_calendar(series, 30),
+        "perf_90d": _perf_calendar(series, 90),
     }
 
     # Dernière cotation — None si aucune ligne (ticker référencé mais pas encore scrapé)
@@ -440,7 +514,103 @@ def build_ticker_detail(
     }
 
 
-__all__ = ["build_snapshot", "build_ticker_detail", "generate_analysis"]
+# --- Pulse (dashboard) ------------------------------------------------------
+
+def build_pulse(session: Session, trading_date: datetime | None = None) -> dict:
+    """Pulse synthétique du marché pour le dashboard — dérivé de `build_snapshot`.
+
+    Retour compact :
+      {
+        trading_date, quotes_count, traded_count, total_value,
+        variation_pct_weighted,         # variation pondérée par valeur échangée
+        top_sector: {sector, avg_var_pct, total_value},
+        bottom_sector: {...},
+        top_mover: {ticker, name, variation_pct, close_price, volume},
+      }
+    Retourne `{"trading_date": None}` si aucune cotation n'est dispo.
+    """
+    snap = build_snapshot(session, trading_date)
+    if snap.get("quotes_count", 0) == 0:
+        return {"trading_date": None}
+
+    # Variation globale pondérée par la valeur échangée (VWAP market-wide)
+    sum_w_var = 0.0
+    sum_w = 0.0
+    for r in snap["all_quotes"]:
+        if r["close_price"] > 0 and r["volume"] > 0:
+            sum_w_var += r["variation_pct"] * r["value_traded"]
+            sum_w += r["value_traded"]
+    variation_weighted = round(sum_w_var / sum_w, 3) if sum_w > 0 else 0.0
+
+    # Meilleur / pire secteur par variation pondérée
+    by_sector_sorted = sorted(snap["by_sector"], key=lambda s: s["avg_var_pct"])
+    bottom_sector = by_sector_sorted[0] if by_sector_sorted else None
+    top_sector = by_sector_sorted[-1] if by_sector_sorted else None
+
+    top_mover = snap["movers_up"][0] if snap["movers_up"] else None
+
+    return {
+        "trading_date": snap["trading_date"],
+        "quotes_count": snap["quotes_count"],
+        "traded_count": snap["traded_count"],
+        "total_value": snap["total_value"],
+        "variation_pct_weighted": variation_weighted,
+        "top_sector": top_sector,
+        "bottom_sector": bottom_sector,
+        "top_mover": top_mover,
+    }
+
+
+def build_pulse_history(session: Session, days: int = 7) -> list[dict]:
+    """Série journalière pour sparkline dashboard (7j par défaut).
+
+    Retour : liste ascendante de `{date, variation_pct_weighted, total_value,
+    traded_count}`. Un point par jour où il y a eu au moins une cotation.
+    """
+    since = datetime.now(UTC) - timedelta(days=days * 2)  # marge pour weekends
+    rows: list[Quote] = list(
+        session.execute(
+            select(Quote)
+            .where(Quote.quote_date >= since)
+            .order_by(Quote.quote_date.asc())
+        ).scalars().all()
+    )
+    if not rows:
+        return []
+
+    # Bucket par date calendaire UTC
+    buckets: dict[str, dict] = {}
+    for q in rows:
+        key = q.quote_date.date().isoformat()
+        b = buckets.setdefault(key, {
+            "date": key,
+            "sum_w_var": 0.0, "sum_w": 0.0,
+            "total_value": 0.0, "traded_count": 0,
+        })
+        b["total_value"] += q.value_traded
+        if q.close_price > 0 and q.volume > 0:
+            b["sum_w_var"] += q.variation_pct * q.value_traded
+            b["sum_w"] += q.value_traded
+            b["traded_count"] += 1
+
+    series = []
+    for key in sorted(buckets.keys()):
+        b = buckets[key]
+        var = round(b["sum_w_var"] / b["sum_w"], 3) if b["sum_w"] > 0 else 0.0
+        series.append({
+            "date": b["date"],
+            "variation_pct_weighted": var,
+            "total_value": b["total_value"],
+            "traded_count": b["traded_count"],
+        })
+    # On tronque aux `days` derniers points (enlève la marge weekends)
+    return series[-days:]
+
+
+__all__ = [
+    "build_snapshot", "build_ticker_detail", "build_pulse",
+    "build_pulse_history", "generate_analysis",
+]
 
 
 # Suppress unused import

@@ -1,11 +1,13 @@
-"""Auth simple par token pour l'API admin."""
-from fastapi import Header, HTTPException, status
+"""Dépendance d'auth unifiée.
 
-from ..config import get_settings
+Toutes les routes admin passent par `current_user` qui accepte :
+  - `Authorization: Bearer <jwt>` (session utilisateur via magic link)
+  - `X-Admin-Token: <admin_api_token>` (bypass super-admin, casse-de-verre)
 
+`require_admin` est conservé comme alias rétro-compat.
+"""
+from .auth import current_user
 
-async def require_admin(x_admin_token: str = Header(..., alias="X-Admin-Token")):
-    settings = get_settings()
-    if x_admin_token != settings.admin_api_token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
-    return True
+require_admin = current_user
+
+__all__ = ["require_admin", "current_user"]

@@ -6,11 +6,33 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 
-from ..analysis.market import build_snapshot, build_ticker_detail, generate_analysis
+from ..analysis.market import (
+    build_pulse,
+    build_pulse_history,
+    build_snapshot,
+    build_ticker_detail,
+    generate_analysis,
+)
 from ..database import get_session
 from .deps import require_admin
 
 router = APIRouter(prefix="/api/market", tags=["market"], dependencies=[Depends(require_admin)])
+
+
+@router.get("/pulse")
+def get_pulse():
+    """Pulse synthétique du marché (hero dashboard)."""
+    with get_session() as s:
+        return build_pulse(s)
+
+
+@router.get("/pulse/history")
+def get_pulse_history(
+    days: int = Query(7, ge=1, le=90, description="Nombre de séances dans la sparkline"),
+):
+    """Série journalière `{date, variation_pct_weighted, total_value}` pour sparkline."""
+    with get_session() as s:
+        return build_pulse_history(s, days=days)
 
 
 class AnalysisOut(BaseModel):

@@ -23,13 +23,18 @@ MANUAL_JOB_ID = "daily_brief_manual"
 
 
 def _run_scheduled() -> None:
-    """Wrapper cron — injecte trigger='cron'."""
-    run_daily_pipeline(trigger="cron")
+    """Wrapper cron — injecte trigger='cron', idempotent par date."""
+    run_daily_pipeline(trigger="cron", force=False)
 
 
-def _run_manual() -> None:
-    """Wrapper déclenchement API — injecte trigger='manual'."""
-    run_daily_pipeline(trigger="manual")
+def _run_manual_idempotent() -> None:
+    """Wrapper API, pas de régénération si brief du jour existe déjà."""
+    run_daily_pipeline(trigger="manual", force=False)
+
+
+def _run_manual_force() -> None:
+    """Wrapper API avec régénération explicite (→ revision 2+)."""
+    run_daily_pipeline(trigger="manual", force=True)
 
 
 class SchedulerManager:
@@ -77,14 +82,19 @@ class SchedulerManager:
         logger.info(f"Job planifié : cron='{cron_expr}', prochain run = {next_run}")
         return {"status": "enabled", "cron": cron_expr, "next_run": str(next_run)}
 
-    def trigger_now(self) -> None:
-        """Déclenche une exécution immédiate en arrière-plan."""
+    def trigger_now(self, force: bool = False) -> None:
+        """Déclenche une exécution immédiate en arrière-plan.
+
+        Args:
+            force: True pour régénérer le brief du jour même s'il existe
+                   déjà (crée une révision). False (défaut) = idempotent.
+        """
         self.scheduler.add_job(
-            _run_manual,
+            _run_manual_force if force else _run_manual_idempotent,
             id=MANUAL_JOB_ID,
             replace_existing=True,
         )
-        logger.info("Déclenchement manuel programmé")
+        logger.info(f"Déclenchement manuel programmé (force={force})")
 
     def _get_config_from_db(self) -> tuple[str, bool]:
         with get_session() as s:

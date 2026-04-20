@@ -15,6 +15,10 @@ os.environ.setdefault("BREVO_SMTP_PASSWORD", "test-pw")
 os.environ.setdefault("EMAIL_FROM", "test@example.ci")
 os.environ.setdefault("EMAIL_TO", "dest@example.ci")
 os.environ.setdefault("ADMIN_API_TOKEN", "test-token-with-at-least-24-chars-to-pass-validator")
+os.environ.setdefault(
+    "JWT_SECRET",
+    "test-jwt-secret-distinct-from-admin-token-and-long-enough-for-hs256",
+)
 
 
 @pytest.fixture(autouse=True)

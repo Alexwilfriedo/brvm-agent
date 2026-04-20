@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
 from ..config import get_settings
@@ -23,6 +23,7 @@ from ..dates import format_date_fr
 from ..delivery.email_brevo import render_email_html
 from ..delivery.sample_brief import sample_brief, sample_snapshot
 from ..models import Brief
+from .deps import require_admin
 
 router = APIRouter(prefix="/preview", tags=["preview"])
 
@@ -78,9 +79,13 @@ def preview_sample_brief(
     return HTMLResponse(html)
 
 
-@router.get("/brief/{brief_id}", response_class=HTMLResponse)
+@router.get(
+    "/brief/{brief_id}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_admin)],
+)
 def preview_stored_brief(brief_id: int):
-    """Rend l'email d'un brief déjà stocké en DB."""
+    """Rend l'email d'un brief stocké en DB. Gated admin (IDOR + data leak)."""
     settings = get_settings()
     tz = ZoneInfo(settings.timezone)
 

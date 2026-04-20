@@ -9,14 +9,15 @@ import re
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, field_validator
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.exc import IntegrityError
 
 from ..database import get_session
 from ..models import Recipient
 from .deps import require_admin
+from .pagination import DEFAULT_LIMIT, PaginatedResponse, ilike_any, paginate
 
 router = APIRouter(
     prefix="/api/recipients",
@@ -82,15 +83,35 @@ class RecipientPatch(BaseModel):
 
 # --- Routes -----------------------------------------------------------------
 
-@router.get("", response_model=list[RecipientOut])
-def list_recipients(channel: Channel | None = None, enabled: bool | None = None):
+@router.get("", response_model=PaginatedResponse[RecipientOut])
+def list_recipients(
+    q: str | None = Query(None, description="Recherche fuzzy dans address/name/notes"),
+    channel: Channel | None = None,
+    enabled: bool | None = None,
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
     with get_session() as s:
         stmt = select(Recipient).order_by(Recipient.channel, Recipient.id)
         if channel is not None:
             stmt = stmt.where(Recipient.channel == channel)
         if enabled is not None:
             stmt = stmt.where(Recipient.enabled.is_(enabled))
-        return [RecipientOut.model_validate(r) for r in s.execute(stmt).scalars().all()]
+        if q:
+            stmt = stmt.where(
+                ilike_any([
+                    cast(Recipient.address, String),
+                    cast(Recipient.name, String),
+                    cast(Recipient.notes, String),
+                ], q)
+            )
+        items, total = paginate(s, stmt, limit=limit, offset=offset)
+        return PaginatedResponse[RecipientOut](
+            items=[RecipientOut.model_validate(r) for r in items],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
 
 
 @router.post("", response_model=RecipientOut, status_code=status.HTTP_201_CREATED)

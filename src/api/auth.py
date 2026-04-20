@@ -14,6 +14,7 @@ Sécurité :
 """
 from __future__ import annotations
 
+import hmac
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -23,7 +24,11 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 
 from ..auth.email import send_magic_link
-from ..auth.rate_limit import RateLimitExceeded, check_rate_limit
+from ..auth.rate_limit import (
+    RateLimitExceeded,
+    check_ip_rate_limit,
+    check_rate_limit,
+)
 from ..auth.tokens import (
     InvalidSessionError,
     create_session_jwt,
@@ -66,10 +71,16 @@ class SessionOut(BaseModel):
 # --- Helpers ---------------------------------------------------------------
 
 def _client_ip(request: Request) -> str:
-    # Respecte X-Forwarded-For derrière Railway / proxy
+    """Extrait l'IP client depuis `X-Forwarded-For`.
+
+    Railway **ajoute** la vraie IP du client à la fin du header (les valeurs
+    à gauche sont user-controllable et peuvent être spoofées). On prend donc
+    la dernière valeur, pas la première — prévient le bypass de rate limit
+    par un attaquant qui injecte `X-Forwarded-For: 127.0.0.1, ...`.
+    """
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
-        return fwd.split(",")[0].strip()
+        return fwd.split(",")[-1].strip()
     if request.client:
         return request.client.host
     return "unknown"
@@ -85,18 +96,27 @@ def request_magic_link(body: RequestLinkIn, request: Request):
     """
     settings = get_settings()
     email = body.email.lower().strip()
+    client_ip = _client_ip(request)
 
     with get_session() as s:
+        # Rate limit IP — **avant** le lookup email. Bloque le probing d'emails
+        # inconnus (sans ça, un attaquant teste indéfiniment).
+        try:
+            check_ip_rate_limit(s, client_ip)
+        except RateLimitExceeded as e:
+            logger.warning(f"Rate limit IP dépassé depuis {client_ip}: {e}")
+            return {"status": "ok"}
+
         user = s.execute(
             select(User).where(User.email == email).where(User.enabled.is_(True))
         ).scalar_one_or_none()
 
-        # Rate limit — appliqué avant même de vérifier l'user (évite les timing attacks)
+        # Rate limit email — complète la limite IP en évitant qu'un user légitime
+        # abuse même depuis une IP sous le seuil.
         try:
             check_rate_limit(s, email)
         except RateLimitExceeded as e:
-            logger.warning(f"Rate limit dépassé pour {email}: {e}")
-            # On renvoie quand même 200 pour ne pas signaler qu'on connaît l'email
+            logger.warning(f"Rate limit email dépassé pour {email}: {e}")
             return {"status": "ok"}
 
         if not user:
@@ -195,9 +215,9 @@ def current_user(request: Request) -> UserOut:
     """
     settings = get_settings()
 
-    # Bypass admin token
-    admin_token = request.headers.get("x-admin-token")
-    if admin_token and admin_token == settings.admin_api_token:
+    # Bypass admin token — comparaison constant-time (résiste timing attacks).
+    admin_token = request.headers.get("x-admin-token") or ""
+    if admin_token and hmac.compare_digest(admin_token, settings.admin_api_token):
         return UserOut(
             id=0,
             email="super-admin@brvm-agent.local",
