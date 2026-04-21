@@ -28,12 +28,13 @@
 | `MODEL_ENRICHMENT` | `claude-sonnet-4-6` | défaut OK |
 | `MODEL_SYNTHESIS` | `claude-opus-4-7` | défaut OK |
 | `DATABASE_URL` | auto-injecté par Railway | ✅ |
-| `BREVO_SMTP_USER` | login `xxx@smtp-brevo.com` de Brevo → SMTP | ✅ |
-| `BREVO_SMTP_PASSWORD` | SMTP key Brevo | ✅ |
-| `EMAIL_FROM` | `brief@tondomaine.ci` (sender/domaine validé côté Brevo) | ✅ |
+| `EMAIL_TRANSPORT` | `smtp` (local) ou `http` (Railway — contourne blocages egress 587) | défaut `smtp` |
+| `BREVO_SMTP_USER` | login `xxx@smtp-brevo.com` (requis si `EMAIL_TRANSPORT=smtp`) | conditionnel |
+| `BREVO_SMTP_PASSWORD` | SMTP key Brevo (requis si `EMAIL_TRANSPORT=smtp`) | conditionnel |
+| `BREVO_API_KEY` | clé API Brevo (requise si `EMAIL_TRANSPORT=http`) | conditionnel |
+| `EMAIL_FROM` | `brief@tondomaine.ci` (sender/domaine validé côté Brevo). **En HTTP, PAS de freemail** (`@gmail.com` → rejet DMARC) | ✅ |
 | `EMAIL_FROM_NAME` | `BRVM Agent` | défaut OK |
 | `EMAIL_TO` | ton email perso (seed 1er recipient si DB vide) | ✅ |
-| `BREVO_API_KEY` | vide (API HTTP en fallback, non utilisée actuellement) | optionnel |
 | `WHATSAPP_*` | vide pour l'instant | optionnel |
 | `TIMEZONE` | `Africa/Abidjan` | défaut OK |
 | `DEFAULT_CRON` | `0 8 * * *` (8h Abidjan) | défaut OK |

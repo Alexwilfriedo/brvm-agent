@@ -1,4 +1,4 @@
-"""Livraison email via SMTP Brevo.
+"""Livraison email via Brevo — SMTP ou API HTTP selon `EMAIL_TRANSPORT`.
 
 Le rendu HTML est délégué à un template Jinja2 (`templates/brief_email.html.j2`)
 pour pouvoir itérer sur la charte graphique sans toucher au code Python.
@@ -9,10 +9,17 @@ Gestion via l'API admin `/api/recipients`.
 Preview : un brief d'exemple est exposé via `/preview/brief` pour valider la
 charte sans envoyer d'email (cf. `src/api/preview.py`).
 
-Note retry : tenacity est appliqué **par destinataire** et non au niveau de la
-boucle complète. Avec un wrap au niveau boucle, un timeout sur le 3e envoi
-déclenchait un retry qui re-livrait les destinataires 1 et 2 → doublons
-garantis. Ici chaque destinataire a sa propre session SMTP courte, isolée.
+Deux transports supportés :
+- **SMTP** (par défaut) : simple, marche en local, peut timeout sur Railway.
+- **API HTTP** (`EMAIL_TRANSPORT=http`) : HTTPS 443, toujours joignable. Le
+  trade-off : Brevo valide le sender strictement et NE RÉÉCRIT PAS le From
+  pour les freemail, donc `EMAIL_FROM=...@gmail.com` sera accepté par Brevo
+  mais rejeté par DMARC Gmail côté réception. Utiliser un sender non-freemail
+  (domaine à toi ou single sender pro validé).
+
+Note retry : tenacity est appliqué **par destinataire** — une session
+SMTP / requête HTTP par mail, isolée. Élimine le bug doublons d'un retry au
+niveau boucle (qui re-livrait les destinataires déjà servis sur échec mid-batch).
 """
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ from email.utils import formataddr
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from tenacity import (
     before_sleep_log,
@@ -133,6 +141,16 @@ class NoRecipientError(RuntimeError):
     """Aucun destinataire email actif en DB — la livraison ne peut pas avoir lieu."""
 
 
+class BrevoApiError(RuntimeError):
+    """Erreur permanente remontée par l'API HTTP Brevo (4xx hors 429)."""
+
+
+class _TransientError(Exception):
+    """Marker interne pour les erreurs transitoires (réseau, timeout, 429, 5xx).
+    Pilote tenacity pour retry. Pas exposé à l'appelant."""
+
+
+# Erreurs SMTP considérées transitoires (retry pertinent)
 _TRANSIENT_SMTP = (
     socket.timeout,
     ConnectionError,
@@ -140,11 +158,10 @@ _TRANSIENT_SMTP = (
     smtplib.SMTPConnectError,
 )
 
-# Retry appliqué **par destinataire** : évite le bug doublons d'un retry au
-# niveau boucle (qui re-livrait les destinataires déjà servis en cas d'échec
-# mid-session).
-_smtp_retry = retry(
-    retry=retry_if_exception_type(_TRANSIENT_SMTP),
+# Retry appliqué **par destinataire** (SMTP OU HTTP) : évite le bug doublons
+# d'un retry au niveau boucle (qui re-livrait les destinataires déjà servis).
+_per_recipient_retry = retry(
+    retry=retry_if_exception_type((*_TRANSIENT_SMTP, _TransientError)),
     wait=wait_exponential(multiplier=5, min=5, max=40),
     stop=stop_after_attempt(4),
     before_sleep=before_sleep_log(logger, logging.WARNING),
@@ -153,7 +170,10 @@ _smtp_retry = retry(
 
 
 class EmailSender:
-    """Envoie un brief à tous les recipients actifs (channel='email') via SMTP Brevo."""
+    """Envoie un brief à tous les recipients actifs (channel='email').
+
+    Transport (SMTP ou HTTP) choisi par `EMAIL_TRANSPORT` dans la config.
+    """
 
     def __init__(self):
         self.s = get_settings()
@@ -173,6 +193,7 @@ class EmailSender:
                 "Ajoute-en via POST /api/recipients ou via EMAIL_TO dans .env (seed)."
             )
 
+        transport = self.s.email_transport.lower()
         sent: list[str] = []
         errors: list[str] = []
         for address, name in recipients:
@@ -181,25 +202,33 @@ class EmailSender:
                 sent.append(address)
             except Exception as e:
                 errors.append(f"{address}: {type(e).__name__}: {e}")
-                logger.error(f"Envoi SMTP échoué pour {address} : {e}")
+                logger.error(f"Envoi {transport} échoué pour {address} : {e}")
 
         if sent:
             logger.info(
-                f"Email envoyé à {len(sent)}/{len(recipients)} destinataire(s) "
-                f": {', '.join(sent)}"
+                f"Email ({transport}) envoyé à {len(sent)}/{len(recipients)} "
+                f"destinataire(s) : {', '.join(sent)}"
             )
             if errors:
                 logger.warning(f"Envois partiellement échoués : {'; '.join(errors)}")
             return sent
 
         # Aucun envoi réussi → erreur dure pour que le pipeline marque `email_ok=False`.
-        raise RuntimeError(f"Tous les envois SMTP ont échoué : {'; '.join(errors)}")
+        raise RuntimeError(f"Tous les envois {transport} ont échoué : {'; '.join(errors)}")
 
-    @_smtp_retry
+    @_per_recipient_retry
     def _send_one_recipient(
         self, subject: str, html: str, address: str, name: str | None,
     ) -> None:
-        """Une session SMTP par destinataire. Retry automatique sur erreur transitoire."""
+        """Dispatch transport + retry automatique sur erreur transitoire."""
+        if self.s.email_transport.lower() == "http":
+            self._send_via_http(subject, html, address, name)
+        else:
+            self._send_via_smtp(subject, html, address, name)
+
+    def _send_via_smtp(
+        self, subject: str, html: str, address: str, name: str | None,
+    ) -> None:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = formataddr((self.s.email_from_name, self.s.email_from))
@@ -211,6 +240,47 @@ class EmailSender:
             server.login(self.s.brevo_smtp_user, self.s.brevo_smtp_password)
             server.send_message(msg)
         logger.info(f"SMTP OK pour {address}")
+
+    def _send_via_http(
+        self, subject: str, html: str, address: str, name: str | None,
+    ) -> None:
+        if not self.s.brevo_api_key:
+            raise BrevoApiError(
+                "BREVO_API_KEY non défini (requis quand EMAIL_TRANSPORT=http). "
+                "Génère-la sur https://app.brevo.com/settings/keys/api."
+            )
+        url = f"{self.s.brevo_api_base_url.rstrip('/')}/smtp/email"
+        headers = {
+            "api-key": self.s.brevo_api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        to_entry: dict[str, str] = {"email": address}
+        if name:
+            to_entry["name"] = name
+        payload = {
+            "sender": {"name": self.s.email_from_name, "email": self.s.email_from},
+            "to": [to_entry],
+            "subject": subject,
+            "htmlContent": html,
+        }
+        try:
+            resp = httpx.post(url, headers=headers, json=payload, timeout=20)
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            raise _TransientError(f"réseau/timeout Brevo HTTP : {e}") from e
+
+        if resp.status_code in (200, 201, 202):
+            try:
+                msg_id = resp.json().get("messageId", "?")
+            except Exception:
+                msg_id = "?"
+            logger.info(f"HTTP OK pour {address} — messageId={msg_id}")
+            return
+
+        preview = (resp.text or "")[:300]
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise _TransientError(f"HTTP {resp.status_code} : {preview}")
+        raise BrevoApiError(f"HTTP {resp.status_code} : {preview}")
 
 
 # --- Test email au démarrage ------------------------------------------------
@@ -256,17 +326,22 @@ def send_startup_test_email() -> None:
         f"</p>"
     )
     try:
-        # On envoie directement (1 recipient, 1 session SMTP) sans passer par
+        # On envoie directement (1 recipient, 1 transport call) sans passer par
         # `active_recipients` — sinon on spam tous les destinataires au boot.
         sender = EmailSender()
         sender._send_one_recipient(subject, html, to_email, to_name)
         logger.info(
-            f"Test startup OK — mail envoyé à {to_email}. "
+            f"Test startup OK ({s.email_transport}) — mail envoyé à {to_email}. "
             f"Si le mail n'arrive pas, consulte Brevo → Transactional → Logs."
         )
     except Exception as e:
+        hint = (
+            "Vérifie BREVO_SMTP_USER/PASSWORD"
+            if s.email_transport.lower() == "smtp"
+            else "Vérifie BREVO_API_KEY"
+        )
         logger.error(
-            f"Test startup ÉCHEC pour {to_email} : {type(e).__name__}: {e}. "
-            f"Vérifie BREVO_SMTP_USER/PASSWORD et que EMAIL_FROM={s.email_from} "
+            f"Test startup ÉCHEC ({s.email_transport}) pour {to_email} : "
+            f"{type(e).__name__}: {e}. {hint} et que EMAIL_FROM={s.email_from} "
             f"est un expéditeur/domaine validé dans Brevo."
         )

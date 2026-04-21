@@ -20,20 +20,29 @@ class Settings(BaseSettings):
     # Database
     database_url: str
 
-    # Brevo SMTP — identité expéditeur + credentials (les destinataires sont en DB, table `recipients`)
+    # Brevo — deux transports disponibles, switch via EMAIL_TRANSPORT.
+    #   - "smtp" : legacy, utilise BREVO_SMTP_USER + BREVO_SMTP_PASSWORD. Marche
+    #     en local, peut timeout sur Railway (ports 25/465/587 souvent bloqués
+    #     par les politiques egress cloud).
+    #   - "http" : API Brevo sur HTTPS 443, utilise BREVO_API_KEY. Toujours
+    #     joignable, mais Brevo valide le sender strictement (freemail comme
+    #     @gmail.com sera accepté par Brevo puis rejeté par DMARC côté Gmail —
+    #     prévoir un sender non-freemail).
+    email_transport: str = "smtp"
+    # SMTP (transport=smtp) — optionnels quand transport=http.
     brevo_smtp_host: str = "smtp-relay.brevo.com"
     brevo_smtp_port: int = 587
-    brevo_smtp_user: str
-    brevo_smtp_password: str
+    brevo_smtp_user: str = ""
+    brevo_smtp_password: str = ""
+    # API HTTP (transport=http) — optionnels quand transport=smtp.
+    brevo_api_key: str = ""
+    brevo_api_base_url: str = "https://api.brevo.com/v3"
+    # Identité expéditeur (doit être un sender/domaine validé dans Brevo)
     email_from: str
     email_from_name: str = "BRVM Agent"
     # Seed-only : si défini ET si table `recipients` vide au démarrage, un recipient email est créé.
     # Les destinataires réels sont ensuite gérés via /api/recipients.
     email_to: str = ""
-    # API HTTP Brevo — conservée optionnelle (dead code pour l'instant, utile si
-    # les timeouts SMTP Railway reviennent).
-    brevo_api_key: str = ""
-    brevo_api_base_url: str = "https://api.brevo.com/v3"
 
     # Wassoya WhatsApp (destinataires en DB — channel='whatsapp')
     # Laisser wassoya_api_key vide désactive proprement l'envoi WhatsApp.
