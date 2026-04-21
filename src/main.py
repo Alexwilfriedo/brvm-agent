@@ -138,13 +138,21 @@ async def lifespan(app: FastAPI):
 
     # Test email au démarrage (opt-in via SEND_STARTUP_TEST_EMAIL=true).
     # Permet de valider la chaîne Brevo sans attendre le cron quotidien.
+    # CRITIQUE : lancé dans un thread pour NE PAS bloquer la lifespan — sur
+    # Railway, si SMTP timeoute, le retry tenacity peut attendre jusqu'à 155s
+    # et faire échouer le healthcheck → deploy marqué en échec.
     logger.info(
         f"Startup test email : SEND_STARTUP_TEST_EMAIL="
         f"{settings.send_startup_test_email} "
         f"(passer à 'true' dans Railway env pour activer)"
     )
     if settings.send_startup_test_email:
-        send_startup_test_email()
+        import threading
+        threading.Thread(
+            target=send_startup_test_email,
+            daemon=True,
+            name="startup-test-email",
+        ).start()
 
     scheduler = get_scheduler()
     scheduler.start()
