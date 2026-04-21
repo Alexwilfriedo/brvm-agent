@@ -4,6 +4,7 @@ import logging
 
 from .base import Collector
 from .brvm_official import BrvmOfficialCollector
+from .sika_communiques import SikaCommuniquesCollector
 from .sika_finance import RssCollector, SikaFinanceCollector
 from .sika_quotes import SikaQuotesCollector
 
@@ -15,6 +16,7 @@ COLLECTOR_CLASSES: dict[str, type[Collector]] = {
     "brvm_official": BrvmOfficialCollector,     # legacy — cassé (brvm.org HTML change)
     "sika_finance": SikaFinanceCollector,        # legacy — flux RSS illisible
     "sika_quotes": SikaQuotesCollector,          # cotations détaillées par ticker
+    "sika_communiques": SikaCommuniquesCollector,  # communiqués officiels (PDF)
     "rss": RssCollector,                         # RSS générique — URL vient de la DB
 }
 
@@ -39,6 +41,19 @@ DEFAULT_SOURCES = [
         "type": "sika_quotes",
         "url": "https://www.sikafinance.com/marches/cotation_{ticker}.{country}",
         "config": {"max_workers": 6},
+    },
+    {
+        "key": "sika_communiques_brvm",
+        "name": "Sika Finance — Communiqués officiels BRVM (PDF)",
+        "type": "sika_communiques",
+        "url": "https://www.sikafinance.com/marches/communiques_brvm",
+        "config": {
+            "lookback_hours": 48,
+            "max_items_per_run": 20,
+            "pdf_max_chars": 15000,
+            "pdf_max_size_mb": 10,
+            "pdf_timeout_s": 20,
+        },
     },
     {
         "key": "financial_afrik",
