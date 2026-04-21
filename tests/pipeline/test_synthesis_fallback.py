@@ -54,7 +54,7 @@ class TestSynthesisFailureSkipsDelivery:
         from src import pipeline
 
         mock_collect.return_value = []
-        mock_persist_coll.return_value = []
+        mock_persist_coll.return_value = ([], {})
         mock_enrich.return_value = []
         mock_snapshot.return_value = {"quotes_count": 10}
         mock_history.return_value = []
@@ -109,7 +109,7 @@ class TestSynthesisFailureSkipsDelivery:
         from src import pipeline
 
         mock_collect.return_value = []
-        mock_persist_coll.return_value = []
+        mock_persist_coll.return_value = ([], {})
         mock_enrich.return_value = []
         mock_snapshot.return_value = {"quotes_count": 10}
         mock_history.return_value = []

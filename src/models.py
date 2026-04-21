@@ -119,6 +119,7 @@ class Brief(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     signals: Mapped[list["Signal"]] = relationship(back_populates="brief", cascade="all, delete-orphan")
+    trades: Mapped[list["Trade"]] = relationship(back_populates="brief")
 
 
 class Signal(Base):
@@ -135,6 +136,54 @@ class Signal(Base):
     signal_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     brief: Mapped["Brief"] = relationship(back_populates="signals")
+
+
+class Trade(Base):
+    """Trade réellement exécuté par l'utilisateur sur la BRVM (self-reported).
+
+    Rôle : fermer la boucle de mesure du projet (epic M). Sans ce registre,
+    impossible de dire si les signaux `brvm-agent` ont amélioré les décisions
+    réelles ou si l'utilisateur aurait pris la même position sans l'outil.
+
+    Champs obligatoires volontairement minimaux pour réduire la friction de
+    logging : ticker + action + quantity + unit_price. Le reste est optionnel.
+
+    `reason` catégorise la source de la décision pour l'analyse PnL :
+      - "brief"    : signal brvm-agent (idéalement lié via brief_id/signal_id)
+      - "intuition": décision perso sans input externe
+      - "news"     : news externe au brief
+      - "other"    : catch-all (rebalance, stop-loss, etc.)
+    """
+    __tablename__ = "trades"
+    __table_args__ = (
+        Index("ix_trades_ticker_executed", "ticker", "executed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    # "buy" | "sell"
+    action: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[int] = mapped_column(Integer)
+    # Prix unitaire en FCFA (Postgres NUMERIC serait plus pur mais Float suffit
+    # vu la granularité BRVM en multiples de 5/10 FCFA).
+    unit_price: Mapped[float] = mapped_column(Float)
+    executed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True,
+    )
+    # "brief" | "intuition" | "news" | "other"
+    reason: Mapped[str] = mapped_column(String(16), default="other")
+    # Lien optionnel vers le brief/signal qui a motivé la décision (permet
+    # le backtest attributionnel : "quels signaux ont été effectivement suivis ?").
+    brief_id: Mapped[int | None] = mapped_column(
+        ForeignKey("briefs.id", ondelete="SET NULL"), index=True,
+    )
+    signal_id: Mapped[int | None] = mapped_column(
+        ForeignKey("signals.id", ondelete="SET NULL"), index=True,
+    )
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    brief: Mapped["Brief | None"] = relationship(back_populates="trades")
 
 
 class ScheduleConfig(Base):

@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from . import events as event_bus
 from .api import auth as auth_api
-from .api import briefs, market, preview, runs, schedule, sources, stats, users
+from .api import briefs, market, preview, runs, schedule, sources, stats, trades, users
 from .api import recipients as recipients_api
 from .collectors.registry import DEFAULT_SOURCES
 from .config import get_settings
@@ -198,6 +198,7 @@ app.include_router(recipients_api.router)
 app.include_router(users.router)
 app.include_router(market.router)
 app.include_router(stats.router)
+app.include_router(trades.router)
 app.include_router(preview.router)
 
 
