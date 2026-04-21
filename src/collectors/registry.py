@@ -48,7 +48,8 @@ DEFAULT_SOURCES = [
         "type": "sika_communiques",
         "url": "https://www.sikafinance.com/marches/communiques_brvm",
         "config": {
-            "lookback_hours": 48,
+            # Cap sécurité 30 jours — la vraie dedup se fait par URL en DB.
+            "lookback_hours": 720,
             "max_items_per_run": 20,
             "pdf_max_chars": 15000,
             "pdf_max_size_mb": 10,

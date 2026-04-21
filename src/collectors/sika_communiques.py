@@ -29,7 +29,10 @@ from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
+from sqlalchemy import select
 
+from ..database import get_session
+from ..models import NewsArticle
 from .base import CollectionResult, Collector, NewsItem
 from .pdf_extractor import (
     DEFAULT_MAX_CHARS,
@@ -85,10 +88,20 @@ def _normalize(text: str) -> str:
 class SikaCommuniquesCollector(Collector):
     """Scrape la page des communiqués BRVM + extrait le texte des PDFs.
 
+    Logique de mémoire : la page Sika liste environ 30 communiqués sur ~20 jours.
+    À chaque run on les parcourt TOUS, on skip ceux dont l'URL PDF est déjà en
+    DB (table news), et on ne télécharge/enrichit que les nouveaux. Ça garantit
+    que si un run rate un lundi matin ou si l'instance est down pendant une
+    semaine, on rattrape automatiquement au prochain run sans intervention.
+
+    `lookback_hours` n'est PLUS un filtre métier — c'est un cap de sécurité
+    (défaut 30 jours) au cas où Sika retournerait un jour de l'historique
+    profond. Le vrai filtre est la dedup par URL.
+
     Config attendue (tous optionnels, avec défauts) :
         {
           "url": "https://www.sikafinance.com/marches/communiques_brvm",
-          "lookback_hours": 48,       # ne traite que les entrées < cet âge
+          "lookback_hours": 720,      # cap sécurité (30 jours)
           "max_items_per_run": 20,    # cap défensif — protège coût Sonnet
           "pdf_max_chars": 15000,     # troncature texte extrait
           "pdf_max_size_mb": 10,      # abort téléchargement si plus gros
@@ -108,7 +121,9 @@ class SikaCommuniquesCollector(Collector):
         url = self.config.get(
             "url", f"{BASE_URL}/marches/communiques_brvm",
         )
-        lookback_hours = int(self.config.get("lookback_hours", 48))
+        # Cap de sécurité large (30 jours par défaut). La vraie dedup se fait
+        # par URL en DB juste en dessous.
+        lookback_hours = int(self.config.get("lookback_hours", 720))
         max_items = int(self.config.get("max_items_per_run", 20))
         pdf_max_chars = int(self.config.get("pdf_max_chars", DEFAULT_MAX_CHARS))
         pdf_max_size_mb = int(self.config.get("pdf_max_size_mb", DEFAULT_MAX_SIZE_MB))
@@ -135,19 +150,29 @@ class SikaCommuniquesCollector(Collector):
             result.errors.append(msg)
             return result
 
-        # Filtre lookback : ne garde que les communiqués récents
+        # Cap de sécurité par âge (protection contre un listing qui retournerait
+        # un jour 10 ans d'historique). Normalement inutile vu que la page Sika
+        # ne montre que ~20 jours.
         cutoff = datetime.now(UTC) - timedelta(hours=lookback_hours)
-        recent = [(d, t, u) for (d, t, u) in entries if d >= cutoff]
+        candidates = [(d, t, u) for (d, t, u) in entries if d >= cutoff]
+
+        # Dedup par URL déjà ingérée : on ne télécharge PAS ce qu'on a déjà vu,
+        # ce qui est critique pour les PDFs (coût network + Sonnet). C'est aussi
+        # ce qui permet de "rattraper la mémoire" après une panne — au prochain
+        # run, on ingère tout ce qui est visible et pas encore en DB.
+        known_urls = self._load_known_urls()
+        fresh = [(d, t, u) for (d, t, u) in candidates if u not in known_urls]
         logger.info(
-            f"[{self.source_key}] {len(entries)} entrées listées, "
-            f"{len(recent)} dans la fenêtre lookback ({lookback_hours}h). "
-            f"Cap à {max_items}."
+            f"[{self.source_key}] {len(entries)} entrées listées · "
+            f"{len(candidates)} dans le cap {lookback_hours}h · "
+            f"{len(known_urls)} déjà connues en DB · "
+            f"{len(fresh)} à traiter (cap {max_items})."
         )
-        recent = recent[:max_items]
+        fresh = fresh[:max_items]
 
         # Téléchargement + extraction séquentiels (PDF coûteux, éviter de
         # marteler Sika en parallèle — 20 PDFs à ~1s chacun = 20s, tolérable).
-        for published_at, title, pdf_url in recent:
+        for published_at, title, pdf_url in fresh:
             try:
                 content = fetch_and_extract(
                     pdf_url,
@@ -185,6 +210,33 @@ class SikaCommuniquesCollector(Collector):
             f"avec texte PDF exploité, {len(result.errors)} erreur(s)."
         )
         return result
+
+    def _load_known_urls(self) -> set[str]:
+        """Charge l'ensemble des URLs PDF déjà en DB pour ce source_key.
+
+        Sert de mémoire persistante : évite de re-télécharger/re-enrichir un
+        communiqué déjà ingéré, tout en laissant le collector parcourir la
+        page complète à chaque run (rattrapage automatique après panne).
+
+        1 requête par run, filtrée par source_key, donc bornée (~30 rows par
+        mois de fonctionnement). Négligeable.
+        """
+        try:
+            with get_session() as s:
+                rows = s.execute(
+                    select(NewsArticle.url).where(
+                        NewsArticle.source_key == self.source_key,
+                    )
+                ).scalars().all()
+                return {url for url in rows if url}
+        except Exception as e:
+            # Si la DB est muette, on préfère re-télécharger que faire échouer
+            # le run. Le pipeline dédupliquera de toute façon à la persistance.
+            logger.warning(
+                f"[{self.source_key}] Impossible de charger les URLs connues "
+                f"({e}) — fallback : pas de dedup côté collector."
+            )
+            return set()
 
     def _parse_listing(
         self, html: str, base_url: str,
