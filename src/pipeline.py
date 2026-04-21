@@ -715,3 +715,59 @@ def _deliver(
         logger.error(f"ÉCHEC LIVRAISON TOTAL brief_id={brief_id}: {errors}")
 
     return {"status": status, "email_ok": email_ok, "whatsapp_ok": whatsapp_ok, "errors": errors}
+
+
+# --- Redelivery (retry manuel depuis l'UI admin) ----------------------------
+
+class RedeliveryError(RuntimeError):
+    """Levée quand un brief ne peut pas être rejoué (stub, inexistant, etc.)."""
+
+
+def redeliver_brief(brief_id: int) -> dict:
+    """Rejoue la livraison email + WhatsApp pour un brief déjà persisté.
+
+    Utilisé par `POST /api/briefs/{brief_id}/redeliver` quand l'envoi initial
+    a échoué (ex : timeout SMTP Brevo). Ne relance PAS la synthèse Opus ni
+    n'incrémente la révision — le brief reste identique, seule la livraison
+    est retentée.
+
+    Contrairement au run cron, on ne crée pas de nouveau `PipelineRun` : la
+    table `briefs` porte déjà `delivery_status` / `delivery_errors` et les
+    champs `email_sent` / `whatsapp_sent` qui sont tous mis à jour par
+    `_deliver`. Pour un audit-trail plus riche plus tard, envisager une table
+    `delivery_attempts` (cf. backlog).
+
+    Raises:
+        RedeliveryError: si le brief n'existe pas, ou si `delivery_status`
+            vaut `failed_synth` (payload stub — on ne livre jamais ça).
+    """
+    settings = get_settings()
+    tz = ZoneInfo(settings.timezone)
+
+    # Lecture en session courte — on ne garde pas la session ouverte pendant
+    # le SMTP (qui peut prendre jusqu'à 30s par destinataire).
+    with get_session() as s:
+        brief = s.get(Brief, brief_id)
+        if brief is None:
+            raise RedeliveryError(f"Brief #{brief_id} introuvable")
+        if brief.delivery_status == "failed_synth":
+            raise RedeliveryError(
+                f"Brief #{brief_id} = payload stub (synthèse échouée) — "
+                "on ne livre jamais ça. Relance le pipeline entier."
+            )
+        brief_json = brief.payload
+        brief_date_local = brief.brief_date.astimezone(tz)
+        revision = brief.revision
+
+    date_str = format_date_fr(brief_date_local)
+
+    # Snapshot marché : on reconstruit à partir de la DB actuelle — c'est ce
+    # qui est affiché dans l'en-tête email. Si la retry a lieu quelques
+    # minutes après le run initial, le snapshot est quasi identique.
+    market_snapshot = _build_market_snapshot()
+
+    logger.info(f"Rejouer livraison brief #{brief_id} (revision {revision})")
+    return _deliver(
+        brief_json, date_str, brief_id,
+        market_snapshot=market_snapshot, revision=revision,
+    )

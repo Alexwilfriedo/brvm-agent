@@ -7,6 +7,7 @@ from sqlalchemy import String, cast, select
 
 from ..database import get_session
 from ..models import Brief
+from ..pipeline import RedeliveryError, redeliver_brief
 from .deps import require_admin
 from .pagination import DEFAULT_LIMIT, PaginatedResponse, ilike_any, paginate
 
@@ -154,3 +155,34 @@ def get_brief(brief_id: int):
             revision=brief.revision,
             revised_at=brief.revised_at,
         )
+
+
+class RedeliverOut(BaseModel):
+    brief_id: int
+    status: str
+    email_ok: bool
+    whatsapp_ok: bool
+    errors: list[str]
+
+
+@router.post("/{brief_id}/redeliver", response_model=RedeliverOut)
+def redeliver(brief_id: int) -> RedeliverOut:
+    """Rejoue email + WhatsApp pour un brief déjà synthétisé.
+
+    Typiquement utilisé depuis la vue Run quand l'envoi initial a échoué
+    (ex : timeout SMTP Brevo). Ne relance pas Opus, n'incrémente pas la
+    révision, ne crée pas de nouveau `pipeline_runs`. Met à jour
+    `briefs.delivery_status` / `delivery_errors` / `email_sent` /
+    `whatsapp_sent`.
+
+    Attention : peut bloquer jusqu'à ~30s si SMTP Brevo est injoignable —
+    le client doit afficher un loader.
+    """
+    try:
+        result = redeliver_brief(brief_id)
+    except RedeliveryError as exc:
+        # 404 si le brief n'existe pas, 409 sinon (état incompatible).
+        msg = str(exc)
+        code = 404 if "introuvable" in msg else 409
+        raise HTTPException(status_code=code, detail=msg) from exc
+    return RedeliverOut(brief_id=brief_id, **result)

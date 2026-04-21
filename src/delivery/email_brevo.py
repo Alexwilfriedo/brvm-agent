@@ -13,12 +13,20 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import socket
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from ..analysis.schemas import BriefPayload
 from ..config import get_settings
@@ -127,10 +135,39 @@ class NoRecipientError(RuntimeError):
     """Aucun destinataire email actif en DB — la livraison ne peut pas avoir lieu."""
 
 
+# Erreurs SMTP qu'on considère comme **transitoires** (retry pertinent) :
+# - socket.timeout : Brevo n'a pas répondu (TCP connect ou session)
+# - ConnectionError : refus TCP, connexion fermée prématurément
+# - SMTPServerDisconnected : le serveur a coupé en cours de session
+# - SMTPConnectError : échec TCP initial côté smtplib
+#
+# On ne retry PAS les erreurs métier (auth invalide, format adresse cassé,
+# contenu rejeté) — elles ne se règlent pas toutes seules.
+_TRANSIENT_SMTP = (
+    socket.timeout,
+    ConnectionError,
+    smtplib.SMTPServerDisconnected,
+    smtplib.SMTPConnectError,
+)
+
+# Politique de retry SMTP — même pattern que `analysis/_retry.py::anthropic_retry`.
+# 4 tentatives avec wait exponentiel 5s → 10s → 20s → 40s (capped).
+# Temps pire cas cumulé : 4×30s (timeout) + 5+10+20 = ~155s. Acceptable pour
+# un brief quotidien.
+_smtp_retry = retry(
+    retry=retry_if_exception_type(_TRANSIENT_SMTP),
+    wait=wait_exponential(multiplier=5, min=5, max=40),
+    stop=stop_after_attempt(4),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
+
+
 class EmailSender:
     """Envoie un brief à tous les recipients actifs (channel='email').
 
     Une seule session SMTP est ouverte pour tous les destinataires.
+    Retry automatique (tenacity) en cas d'erreur SMTP transitoire.
     """
 
     def __init__(self):
@@ -138,14 +175,24 @@ class EmailSender:
 
     def send(self, subject: str, html: str) -> list[str]:
         """Envoie à tous les recipients email actifs. Retourne la liste
-        des adresses servies."""
+        des adresses servies.
+
+        Retry jusqu'à 4 fois avec backoff exponentiel si Brevo timeout ou
+        ferme la connexion. Les erreurs métier (auth, format) remontent
+        immédiatement sans retry.
+        """
         recipients = active_recipients("email")
         if not recipients:
             raise NoRecipientError(
                 "Aucun recipient email actif en DB. "
                 "Ajoute-en via POST /api/recipients ou via EMAIL_TO dans .env (seed)."
             )
+        return self._send_once(subject, html, recipients)
 
+    @_smtp_retry
+    def _send_once(
+        self, subject: str, html: str, recipients: list[tuple[str, str]]
+    ) -> list[str]:
         sent_to: list[str] = []
         with smtplib.SMTP(self.s.brevo_smtp_host, self.s.brevo_smtp_port, timeout=30) as server:
             server.starttls()
