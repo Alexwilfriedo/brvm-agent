@@ -75,15 +75,31 @@ class Opportunity(BaseModel):
     invalidation: str | None = None
 
 
+def _coerce_none_to_empty(v: object) -> str:
+    """Opus peut renvoyer null pour une string vide → on coerce en ''."""
+    return "" if v is None else v  # type: ignore[return-value]
+
+
 class BriefPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    market_summary: str = ""
+    # Opus renvoie parfois null pour les strings "vides". On tolère.
+    market_summary: str = Field(default="")
     market_regime: Regime | None = None
     opportunities: list[Opportunity] = Field(default_factory=list)
     alerts: list[str] = Field(default_factory=list)
     watchlist_updates: list[str] = Field(default_factory=list)
-    skip_reasons: str = ""
+    skip_reasons: str = Field(default="")
+
+    @classmethod
+    def _strip_none_strings(cls, v: dict) -> dict:
+        """Coerce les string fields à '' si Opus les a retournés à null."""
+        if not isinstance(v, dict):
+            return v
+        for key in ("market_summary", "skip_reasons"):
+            if v.get(key) is None:
+                v[key] = ""
+        return v
 
     # Flag interne quand la synthèse a échoué (voir synthesis.py::_error_payload)
     is_error: bool = Field(default=False, alias="_error")
@@ -91,7 +107,13 @@ class BriefPayload(BaseModel):
 
     @classmethod
     def from_raw(cls, raw: dict | None) -> BriefPayload:
-        """Parse un dict brut en tolérant un payload incomplet."""
+        """Parse un dict brut en tolérant un payload incomplet.
+
+        Opus renvoie parfois null pour les champs string "vides" (ex.
+        `skip_reasons: null` quand il a des opportunités). On sanitize avant
+        validation pour éviter un crash qui casserait la livraison.
+        """
         if not raw:
             return cls()
-        return cls.model_validate(raw)
+        sanitized = cls._strip_none_strings(dict(raw))
+        return cls.model_validate(sanitized)
