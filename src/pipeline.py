@@ -253,8 +253,12 @@ def _run_pipeline_body(run_id: int) -> dict:
     events.publish(run_id, "step.start", step="snapshot")
     market_snapshot = _build_market_snapshot()
     historical_context = _build_historical_context()
+    # Contexte fondamental par ticker mentionné : permet à Opus de chiffrer
+    # price_current / target / valuation sans inventer.
+    ticker_fundamentals = _build_ticker_fundamentals(enriched)
     events.publish(run_id, "step.done", step="snapshot",
-                   quotes=market_snapshot.get("quotes_count", 0))
+                   quotes=market_snapshot.get("quotes_count", 0),
+                   tickers_with_fundamentals=len(ticker_fundamentals))
 
     # 5. Synthèse (Opus)
     events.publish(run_id, "step.start", step="synthesize")
@@ -262,6 +266,7 @@ def _run_pipeline_body(run_id: int) -> dict:
         market_snapshot=market_snapshot,
         enriched_news=enriched,
         historical_context=historical_context,
+        ticker_fundamentals=ticker_fundamentals,
     )
     opp_count = len(brief_json.get("opportunities", []))
     synthesis_failed = bool(brief_json.get("_error"))
@@ -538,6 +543,56 @@ def _build_market_snapshot() -> dict:
             "top_losers":  [_compact(r) for r in snap["movers_down"]],
             "top_volumes": [_compact(r) for r in snap["top_volumes"]],
         }
+
+
+def _build_ticker_fundamentals(enriched_news: list[dict]) -> list[dict]:
+    """Fondamentaux à jour par ticker mentionné dans les news enrichies.
+
+    Pour chaque ticker extrait des `enriched_news`, on récupère la cotation la
+    plus récente en DB (close_price + extras Sika : per, dividend, dividend_yield,
+    market_cap, beta, rsi) et on l'envoie à Opus comme matière première chiffrée
+    pour remplir `price_current` / `valuation` sans inventer.
+
+    Si aucun ticker dans les news → liste vide, Opus se rabat sur le
+    market_snapshot. Cap à 30 tickers (au-delà, le payload grossit sans valeur
+    ajoutée — Opus ne recommandera pas 30 titres dans un brief).
+    """
+    candidates: set[str] = set()
+    for item in enriched_news:
+        for t in (item.get("tickers_mentioned") or []):
+            if isinstance(t, str) and t.strip():
+                candidates.add(t.strip().upper())
+    if not candidates:
+        return []
+
+    out: list[dict] = []
+    with get_session() as s:
+        for ticker in sorted(candidates)[:30]:
+            q = s.execute(
+                select(Quote)
+                .where(Quote.ticker == ticker)
+                .order_by(Quote.quote_date.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if not q:
+                continue
+            out.append({
+                "ticker": q.ticker,
+                "name": q.name or "",
+                "sector": q.sector or "",
+                "country": q.country or "",
+                "close_price": q.close_price,
+                "previous_close": (q.extras or {}).get("previous_close"),
+                "variation_pct": q.variation_pct,
+                "volume_shares": q.volume,
+                "per": (q.extras or {}).get("per"),
+                "dividend": (q.extras or {}).get("dividend"),
+                "dividend_yield_pct": (q.extras or {}).get("dividend_yield_pct"),
+                "market_cap_mfcfa": (q.extras or {}).get("market_cap_mfcfa"),
+                "beta_1y": (q.extras or {}).get("beta_1y"),
+                "rsi": (q.extras or {}).get("rsi"),
+            })
+    return out
 
 
 def _build_historical_context(days: int = 5) -> list[dict]:

@@ -38,11 +38,19 @@ class BriefSynthesizer:
         market_snapshot: dict,
         enriched_news: list[dict],
         historical_context: list[dict] | None = None,
+        ticker_fundamentals: list[dict] | None = None,
     ) -> dict:
-        """Appelle Opus pour produire le brief JSON final. Retourne toujours un dict valide."""
+        """Appelle Opus pour produire le brief JSON final. Retourne toujours un dict valide.
+
+        `ticker_fundamentals` : liste de dicts avec close_price + extras
+        (per, dividend, dividend_yield, etc.) pour chaque ticker candidat.
+        Permet à Opus de chiffrer price_current / target / valuation sans
+        inventer. Voir `_build_ticker_fundamentals` dans pipeline.py.
+        """
         payload = {
             "market_snapshot": market_snapshot,
             "enriched_news": enriched_news,
+            "ticker_fundamentals": ticker_fundamentals or [],
             "historical_context": historical_context or [],
         }
         user_content = (
@@ -62,10 +70,22 @@ class BriefSynthesizer:
             return _error_payload(str(e))
 
         try:
-            return json.loads(_strip_fence(raw))
+            data = json.loads(_strip_fence(raw))
         except json.JSONDecodeError as e:
             logger.error(f"Brief synthesis JSON invalide: {e} — raw[:300]={raw[:300]!r}")
             return _error_payload(f"JSON parse error: {e}", raw_preview=raw[:500])
+
+        # Filet de sécurité : calculer gain_potential_pct si Opus l'a omis
+        # alors qu'on a price_current + price_target.
+        for opp in data.get("opportunities") or []:
+            if not isinstance(opp, dict):
+                continue
+            if opp.get("gain_potential_pct") is None:
+                cur = opp.get("price_current")
+                tgt = opp.get("price_target")
+                if isinstance(cur, (int, float)) and isinstance(tgt, (int, float)) and cur:
+                    opp["gain_potential_pct"] = round((tgt - cur) / cur * 100, 2)
+        return data
 
 
 def _error_payload(reason: str, raw_preview: str = "") -> dict:

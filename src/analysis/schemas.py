@@ -21,11 +21,36 @@ Regime = Literal[
 ]
 
 
+class Valuation(BaseModel):
+    """Ratios fondamentaux optionnels, alignés avec la grille des notes
+    bimensuelles des bureaux sell-side ivoiriens (J&D Advisory, CGF Bourse…).
+
+    Tous optionnels : Opus remplit ce qu'il peut inférer des fondamentaux
+    Sika passés en contexte + estimations explicites. Une valeur absente
+    signifie "non communiqué / non estimable".
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    # Dividende par action — ajusté split éventuel
+    dpa_current: float | None = None
+    dpa_estimate: float | None = None
+    # Price / Book
+    p_b_current: float | None = None
+    p_b_estimate: float | None = None
+    # Price / Earnings Ratio
+    per_current: float | None = None
+    per_estimate: float | None = None
+    # Rendement dividende (%)
+    dividend_yield_current: float | None = None
+    dividend_yield_estimate: float | None = None
+
+
 class Opportunity(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     ticker: str
     name: str = ""
+    sector: str = ""
     direction: Direction = "watch"
     conviction: int = Field(default=3, ge=1, le=5)
     time_horizon: TimeHorizon | None = None
@@ -33,6 +58,19 @@ class Opportunity(BaseModel):
     signals: list[str] = Field(default_factory=list)
     catalysts: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
+
+    # Prix & potentiel (format JDA Advisory)
+    price_current: float | None = None     # cours du jour, FCFA
+    price_target: float | None = None      # cours cible, FCFA
+    gain_potential_pct: float | None = None  # (target - current) / current × 100
+    price_range_min: float | None = None   # prix min du range d'entrée
+    price_range_max: float | None = None   # prix max du range d'entrée
+
+    # Ratios fondamentaux
+    valuation: Valuation | None = None
+
+    # Conservé pour rétro-compat et usage libre — à terme on privilégie les
+    # champs chiffrés ci-dessus.
     entry_zone_fcfa: str | None = None
     invalidation: str | None = None
 
