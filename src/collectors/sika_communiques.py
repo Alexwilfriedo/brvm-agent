@@ -57,6 +57,7 @@ ABIDJAN_TZ = ZoneInfo("Africa/Abidjan")
 _NAME_SYNONYMS: dict[str, str] = {
     "bicici": "BICC",
     "sgbci": "SGBC",
+    "sicable": "CABC",
     "sicor": "SICC",
     "palmci": "PALC",
     "solibra": "SLBC",

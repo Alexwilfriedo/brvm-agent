@@ -201,14 +201,32 @@ def _run_pipeline_body(run_id: int) -> dict:
     # 1. Collecte
     events.publish(run_id, "step.start", step="collect")
     collection_results = _collect_all(run_id)
+    # Détail par source — permet la vue "Par source" dans l'UI admin sans
+    # schema change. `news_urls` est la clé naturelle pour JOIN la table `news`
+    # ensuite (cf. GET /api/runs/{id}/sources). Borné à 100 URLs par source
+    # pour éviter de gonfler PipelineRun.summary (RSS verbeux type lefaso).
+    sources_detail = [
+        {
+            "source_key": r.source_key,
+            "news_count": len(r.news),
+            "quotes_count": len(r.quotes),
+            "errors": r.errors,
+            "news_urls": [n.url for n in r.news[:100] if n.url],
+        }
+        for r in collection_results
+    ]
     collect_summary = {
         "step": "collect",
         "sources": len(collection_results),
         "news_count": sum(len(r.news) for r in collection_results),
         "quotes_count": sum(len(r.quotes) for r in collection_results),
         "errors": [e for r in collection_results for e in r.errors],
+        "by_source": sources_detail,
     }
     summary["steps"].append(collect_summary)
+    # Raccourci de top-level pour que l'endpoint /api/runs/{id}/sources trouve
+    # ça rapidement sans avoir à scanner steps[].
+    summary["by_source"] = sources_detail
     events.publish(run_id, "step.done", step="collect",
                    sources=collect_summary["sources"],
                    news=collect_summary["news_count"],
@@ -216,7 +234,12 @@ def _run_pipeline_body(run_id: int) -> dict:
 
     # 2. Persistance brute
     events.publish(run_id, "step.start", step="persist")
-    new_news_items = _persist_collection(collection_results)
+    new_news_items, new_urls_by_source = _persist_collection(collection_results)
+    # Enrichit `sources_detail` avec la liste des news **nouvellement** insérées
+    # (discrimine les doublons déjà en DB des vraies nouvelles captures).
+    for entry in sources_detail:
+        entry["new_news_urls"] = new_urls_by_source.get(entry["source_key"], [])
+        entry["new_news_count"] = len(entry["new_news_urls"])
     summary["steps"].append({"step": "persist", "new_news": len(new_news_items)})
     events.publish(run_id, "step.done", step="persist", new_news=len(new_news_items))
 
@@ -339,9 +362,18 @@ def _collect_all(run_id: int | None = None) -> list[CollectionResult]:
     return results
 
 
-def _persist_collection(results: list[CollectionResult]) -> list[NewsItem]:
-    """Persiste cotations + news. Retourne les NewsItem nouvellement insérés."""
+def _persist_collection(
+    results: list[CollectionResult],
+) -> tuple[list[NewsItem], dict[str, list[str]]]:
+    """Persiste cotations + news.
+
+    Retourne :
+        - la liste des NewsItem nouvellement insérés (tous sources confondues)
+        - un dict `{source_key: [new_url, ...]}` pour discriminer les news
+          vraiment nouvelles par source dans PipelineRun.summary.
+    """
     new_news: list[NewsItem] = []
+    new_urls_by_source: dict[str, list[str]] = {}
     with get_session() as s:
         for result in results:
             for q in result.quotes:
@@ -398,7 +430,8 @@ def _persist_collection(results: list[CollectionResult]) -> list[NewsItem]:
                     summary=n.summary, content=n.content,
                 ))
                 new_news.append(n)
-    return new_news
+                new_urls_by_source.setdefault(result.source_key, []).append(n.url)
+    return new_news, new_urls_by_source
 
 
 def _enrich_news(articles: list[NewsItem], run_id: int | None = None) -> list[dict]:
