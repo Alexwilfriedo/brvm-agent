@@ -204,7 +204,11 @@ def _call_sonnet(payload: dict) -> tuple[str, int, int]:
     client = Anthropic(api_key=settings.anthropic_api_key)
     resp = client.messages.create(
         model=settings.model_enrichment,  # Sonnet — moins cher que Opus pour cette tâche
-        max_tokens=1500,
+        # 1500 tokens était trop serré : le schéma (headline + summary + 4×sector +
+        # 5×signals + 5×watchlist) génère couramment 1200-1500 tokens, et Sonnet
+        # verbeux dépasse → JSON coupé mid-string → JSONDecodeError. Cap à 4000
+        # pour la marge, coût marginal ($0.012/analyse à $3/M output).
+        max_tokens=4000,
         system=_ANALYSIS_SYSTEM,
         messages=[{
             "role": "user",

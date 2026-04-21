@@ -162,7 +162,7 @@ def smtp_mock(monkeypatch):
     sent = []
 
     class FakeSMTP:
-        def __init__(self, host, port):
+        def __init__(self, host, port, timeout=None):
             self.host = host
             self.port = port
 

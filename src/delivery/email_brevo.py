@@ -8,16 +8,24 @@ Gestion via l'API admin `/api/recipients`.
 
 Preview : un brief d'exemple est exposé via `/preview/brief` pour valider la
 charte sans envoyer d'email (cf. `src/api/preview.py`).
+
+Note retry : tenacity est appliqué **par destinataire** et non au niveau de la
+boucle complète. Avec un wrap au niveau boucle, un timeout sur le 3e envoi
+déclenchait un retry qui re-livrait les destinataires 1 et 2 → doublons
+garantis. Ici chaque destinataire a sa propre session SMTP courte, isolée.
 """
 from __future__ import annotations
 
 import logging
+import os
 import smtplib
 import socket
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from tenacity import (
@@ -84,17 +92,7 @@ def render_email_html(
     app_version: str = "v0.1",
     revision: int = 1,
 ) -> tuple[str, str]:
-    """Retourne (sujet, html) à partir du dict JSON du brief.
-
-    Args:
-        brief_raw: payload brut produit par Opus (synthesis.py).
-        date_str: date formatée en français ("Lundi 21 avril 2026").
-        market_snapshot: snapshot des cotations (top gainers/losers).
-        edition_num: numéro d'édition affiché dans l'en-tête.
-        app_version: affiché en pied de page.
-        revision: numéro de révision (1 = première émission). Si > 1, le
-                  sujet et le template mentionnent explicitement la révision.
-    """
+    """Retourne (sujet, html) à partir du dict JSON du brief."""
     brief = BriefPayload.from_raw(brief_raw)
 
     subject_prefix = f"[Révision {revision}] " if revision > 1 else ""
@@ -135,14 +133,6 @@ class NoRecipientError(RuntimeError):
     """Aucun destinataire email actif en DB — la livraison ne peut pas avoir lieu."""
 
 
-# Erreurs SMTP qu'on considère comme **transitoires** (retry pertinent) :
-# - socket.timeout : Brevo n'a pas répondu (TCP connect ou session)
-# - ConnectionError : refus TCP, connexion fermée prématurément
-# - SMTPServerDisconnected : le serveur a coupé en cours de session
-# - SMTPConnectError : échec TCP initial côté smtplib
-#
-# On ne retry PAS les erreurs métier (auth invalide, format adresse cassé,
-# contenu rejeté) — elles ne se règlent pas toutes seules.
 _TRANSIENT_SMTP = (
     socket.timeout,
     ConnectionError,
@@ -150,10 +140,9 @@ _TRANSIENT_SMTP = (
     smtplib.SMTPConnectError,
 )
 
-# Politique de retry SMTP — même pattern que `analysis/_retry.py::anthropic_retry`.
-# 4 tentatives avec wait exponentiel 5s → 10s → 20s → 40s (capped).
-# Temps pire cas cumulé : 4×30s (timeout) + 5+10+20 = ~155s. Acceptable pour
-# un brief quotidien.
+# Retry appliqué **par destinataire** : évite le bug doublons d'un retry au
+# niveau boucle (qui re-livrait les destinataires déjà servis en cas d'échec
+# mid-session).
 _smtp_retry = retry(
     retry=retry_if_exception_type(_TRANSIENT_SMTP),
     wait=wait_exponential(multiplier=5, min=5, max=40),
@@ -164,11 +153,7 @@ _smtp_retry = retry(
 
 
 class EmailSender:
-    """Envoie un brief à tous les recipients actifs (channel='email').
-
-    Une seule session SMTP est ouverte pour tous les destinataires.
-    Retry automatique (tenacity) en cas d'erreur SMTP transitoire.
-    """
+    """Envoie un brief à tous les recipients actifs (channel='email') via SMTP Brevo."""
 
     def __init__(self):
         self.s = get_settings()
@@ -177,9 +162,9 @@ class EmailSender:
         """Envoie à tous les recipients email actifs. Retourne la liste
         des adresses servies.
 
-        Retry jusqu'à 4 fois avec backoff exponentiel si Brevo timeout ou
-        ferme la connexion. Les erreurs métier (auth, format) remontent
-        immédiatement sans retry.
+        Raises:
+            NoRecipientError: aucun destinataire actif en DB.
+            Exception: si TOUS les envois unitaires échouent après retry.
         """
         recipients = active_recipients("email")
         if not recipients:
@@ -187,25 +172,101 @@ class EmailSender:
                 "Aucun recipient email actif en DB. "
                 "Ajoute-en via POST /api/recipients ou via EMAIL_TO dans .env (seed)."
             )
-        return self._send_once(subject, html, recipients)
+
+        sent: list[str] = []
+        errors: list[str] = []
+        for address, name in recipients:
+            try:
+                self._send_one_recipient(subject, html, address, name)
+                sent.append(address)
+            except Exception as e:
+                errors.append(f"{address}: {type(e).__name__}: {e}")
+                logger.error(f"Envoi SMTP échoué pour {address} : {e}")
+
+        if sent:
+            logger.info(
+                f"Email envoyé à {len(sent)}/{len(recipients)} destinataire(s) "
+                f": {', '.join(sent)}"
+            )
+            if errors:
+                logger.warning(f"Envois partiellement échoués : {'; '.join(errors)}")
+            return sent
+
+        # Aucun envoi réussi → erreur dure pour que le pipeline marque `email_ok=False`.
+        raise RuntimeError(f"Tous les envois SMTP ont échoué : {'; '.join(errors)}")
 
     @_smtp_retry
-    def _send_once(
-        self, subject: str, html: str, recipients: list[tuple[str, str]]
-    ) -> list[str]:
-        sent_to: list[str] = []
+    def _send_one_recipient(
+        self, subject: str, html: str, address: str, name: str | None,
+    ) -> None:
+        """Une session SMTP par destinataire. Retry automatique sur erreur transitoire."""
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = formataddr((self.s.email_from_name, self.s.email_from))
+        msg["To"] = formataddr((name, address)) if name else address
+        msg.attach(MIMEText(html, "html", "utf-8"))
+
         with smtplib.SMTP(self.s.brevo_smtp_host, self.s.brevo_smtp_port, timeout=30) as server:
             server.starttls()
             server.login(self.s.brevo_smtp_user, self.s.brevo_smtp_password)
+            server.send_message(msg)
+        logger.info(f"SMTP OK pour {address}")
 
-            for address, name in recipients:
-                msg = MIMEMultipart("alternative")
-                msg["Subject"] = subject
-                msg["From"] = formataddr((self.s.email_from_name, self.s.email_from))
-                msg["To"] = formataddr((name, address)) if name else address
-                msg.attach(MIMEText(html, "html", "utf-8"))
-                server.send_message(msg)
-                sent_to.append(address)
 
-        logger.info(f"Email envoyé à {len(sent_to)} destinataire(s) : {', '.join(sent_to)}")
-        return sent_to
+# --- Test email au démarrage ------------------------------------------------
+
+def send_startup_test_email() -> None:
+    """Envoie un email de test minimal au 1er recipient actif (ou à `EMAIL_TO`).
+
+    Utilisé au démarrage de l'app (gated par `SEND_STARTUP_TEST_EMAIL=true`)
+    pour valider la chaîne Brevo sans attendre le cron quotidien. Ne lève
+    jamais — log explicite sur succès/échec pour que la cause soit visible
+    immédiatement dans les logs Railway.
+    """
+    s = get_settings()
+    try:
+        recipients = active_recipients("email")
+    except Exception as e:
+        logger.error(f"Test startup : impossible de lire les recipients ({e})")
+        return
+
+    target: tuple[str, str | None] | None = None
+    if recipients:
+        target = recipients[0]
+    elif s.email_to:
+        target = (s.email_to, None)
+    else:
+        logger.warning(
+            "Test startup : aucun recipient actif et EMAIL_TO vide — skip."
+        )
+        return
+
+    to_email, to_name = target
+    tz = ZoneInfo(os.getenv("TIMEZONE", "Africa/Abidjan"))
+    when = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+    subject = f"[TEST] BRVM Agent démarré — {when}"
+    html = (
+        f"<p>Ping de démarrage — BRVM Agent vient de booter.</p>"
+        f"<p><strong>Sender (from)</strong> : {s.email_from}</p>"
+        f"<p><strong>Recipient (to)</strong> : {to_email}</p>"
+        f"<p><strong>Horodatage</strong> : {when}</p>"
+        f"<p style='color:#64748B;font-size:12px'>"
+        f"Désactive ce test en mettant <code>SEND_STARTUP_TEST_EMAIL=false</code> "
+        f"(ou en retirant la variable) dans les envs."
+        f"</p>"
+    )
+    try:
+        # On envoie directement (1 recipient, 1 session SMTP) sans passer par
+        # `active_recipients` — sinon on spam tous les destinataires au boot.
+        sender = EmailSender()
+        sender._send_one_recipient(subject, html, to_email, to_name)
+        logger.info(
+            f"Test startup OK — mail envoyé à {to_email}. "
+            f"Si le mail n'arrive pas, consulte Brevo → Transactional → Logs."
+        )
+    except Exception as e:
+        logger.error(
+            f"Test startup ÉCHEC pour {to_email} : {type(e).__name__}: {e}. "
+            f"Vérifie BREVO_SMTP_USER/PASSWORD et que EMAIL_FROM={s.email_from} "
+            f"est un expéditeur/domaine validé dans Brevo."
+        )

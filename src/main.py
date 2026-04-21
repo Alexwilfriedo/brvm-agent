@@ -19,6 +19,7 @@ from .api import recipients as recipients_api
 from .collectors.registry import DEFAULT_SOURCES
 from .config import get_settings
 from .database import get_session, init_db
+from .delivery.email_brevo import send_startup_test_email
 from .models import Recipient, Source, User
 from .observability import configure_logging, configure_sentry
 from .scheduler import get_scheduler
@@ -134,6 +135,16 @@ async def lifespan(app: FastAPI):
     _seed_recipients_from_env()
     _seed_initial_admin()
     _reap_orphan_runs()
+
+    # Test email au démarrage (opt-in via SEND_STARTUP_TEST_EMAIL=true).
+    # Permet de valider la chaîne Brevo sans attendre le cron quotidien.
+    logger.info(
+        f"Startup test email : SEND_STARTUP_TEST_EMAIL="
+        f"{settings.send_startup_test_email} "
+        f"(passer à 'true' dans Railway env pour activer)"
+    )
+    if settings.send_startup_test_email:
+        send_startup_test_email()
 
     scheduler = get_scheduler()
     scheduler.start()

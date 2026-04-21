@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # Seed-only : si défini ET si table `recipients` vide au démarrage, un recipient email est créé.
     # Les destinataires réels sont ensuite gérés via /api/recipients.
     email_to: str = ""
+    # API HTTP Brevo — conservée optionnelle (dead code pour l'instant, utile si
+    # les timeouts SMTP Railway reviennent).
+    brevo_api_key: str = ""
+    brevo_api_base_url: str = "https://api.brevo.com/v3"
 
     # Wassoya WhatsApp (destinataires en DB — channel='whatsapp')
     # Laisser wassoya_api_key vide désactive proprement l'envoi WhatsApp.
@@ -77,6 +81,12 @@ class Settings(BaseSettings):
     # Misc
     log_level: str = "INFO"
     news_lookback_hours: int = 36
+
+    # Envoi d'un mail de test au démarrage pour valider la config Brevo sans
+    # attendre le cron quotidien. À activer temporairement après un changement
+    # d'EMAIL_FROM / BREVO_API_KEY, puis à désactiver (évite de spammer à chaque
+    # redéploy).
+    send_startup_test_email: bool = False
 
     # --- Propriétés dérivées -------------------------------------------
 

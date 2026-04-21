@@ -30,10 +30,10 @@
 | `DATABASE_URL` | auto-injecté par Railway | ✅ |
 | `BREVO_SMTP_USER` | login `xxx@smtp-brevo.com` de Brevo → SMTP | ✅ |
 | `BREVO_SMTP_PASSWORD` | SMTP key Brevo | ✅ |
-| `EMAIL_FROM` | `brief@tondomaine.ci` (domaine DKIM-validé) | ✅ |
+| `EMAIL_FROM` | `brief@tondomaine.ci` (sender/domaine validé côté Brevo) | ✅ |
 | `EMAIL_FROM_NAME` | `BRVM Agent` | défaut OK |
-| `EMAIL_TO` | ton email perso | ✅ |
-| `BREVO_API_KEY` | vide pour l'instant (WhatsApp phase 2) | optionnel |
+| `EMAIL_TO` | ton email perso (seed 1er recipient si DB vide) | ✅ |
+| `BREVO_API_KEY` | vide (API HTTP en fallback, non utilisée actuellement) | optionnel |
 | `WHATSAPP_*` | vide pour l'instant | optionnel |
 | `TIMEZONE` | `Africa/Abidjan` | défaut OK |
 | `DEFAULT_CRON` | `0 8 * * *` (8h Abidjan) | défaut OK |

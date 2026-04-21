@@ -81,7 +81,7 @@ MODEL_SYNTHESIS=claude-opus-4-7
 
 1. Crée un compte [Brevo](https://www.brevo.com)
 2. SMTP & API → **SMTP** : copie login + smtp key
-3. Valide un domaine d'envoi (DKIM/SPF) pour ne pas tomber en spam
+3. Valide un sender ou un domaine d'envoi (DKIM/SPF) pour ne pas tomber en spam
 
 ```
 BREVO_SMTP_USER=xxxxx@smtp-brevo.com
