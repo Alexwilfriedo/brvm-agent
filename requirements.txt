@@ -34,3 +34,6 @@ sentry-sdk[fastapi,sqlalchemy]==2.58.0
 
 # Logs structurés (JSON en prod, lisible en dev)
 structlog==25.5.0
+
+# Auth : JWT HS256 pour sessions magic-link
+PyJWT==2.10.1
