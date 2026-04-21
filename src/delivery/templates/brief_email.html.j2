@@ -202,7 +202,7 @@
                     <div style="margin-top:4px;font-size:12px;color:#64748B;">
                       Conviction {{ '●' * o.conviction }}{{ '○' * (5 - o.conviction) }}
                       {% if o.time_horizon %} · Horizon {{ o.time_horizon }}{% endif %}
-                      {% if o.entry_zone_fcfa %} · Zone {{ o.entry_zone_fcfa }} FCFA{% endif %}
+                      {% if o.sector %} · {{ o.sector }}{% endif %}
                     </div>
                   </td>
                   <td align="right" valign="top" style="white-space:nowrap;">
@@ -213,8 +213,83 @@
                 </tr>
               </table>
 
+              {# ============ BLOC PRIX / GAIN POTENTIEL ============ #}
+              {% if o.price_current is not none or o.price_target is not none or o.gain_potential_pct is not none %}
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px;background:#F8FAFC;border:1px solid #E2E8F0;border-radius:4px;">
+                <tr>
+                  <td width="33%" align="left" style="padding:10px 12px;border-right:1px solid #E2E8F0;">
+                    <div style="font-size:10px;letter-spacing:0.12em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:3px;">Cours du jour</div>
+                    <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;font-size:13px;color:#0A2540;">{{ o.price_current|fcfa }}</div>
+                  </td>
+                  <td width="33%" align="left" style="padding:10px 12px;border-right:1px solid #E2E8F0;">
+                    <div style="font-size:10px;letter-spacing:0.12em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:3px;">Cours cible</div>
+                    <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;font-size:13px;color:#0A2540;">{{ o.price_target|fcfa }}</div>
+                  </td>
+                  <td width="34%" align="left" style="padding:10px 12px;">
+                    <div style="font-size:10px;letter-spacing:0.12em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:3px;">Gain potentiel</div>
+                    <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;font-size:15px;font-weight:700;color:{% if o.gain_potential_pct is not none and o.gain_potential_pct > 0 %}#059669{% elif o.gain_potential_pct is not none and o.gain_potential_pct < 0 %}#DC2626{% else %}#64748B{% endif %};">{{ o.gain_potential_pct|gain_pct }}</div>
+                  </td>
+                </tr>
+              </table>
+              {% endif %}
+
               {% if o.thesis %}
               <p style="margin:14px 0 0;font-size:14px;line-height:1.6;color:#1E293B;">{{ o.thesis }}</p>
+              {% endif %}
+
+              {# ============ RATIOS FONDAMENTAUX ============ #}
+              {% if o.valuation and (o.valuation.dpa_current is not none or o.valuation.p_b_current is not none or o.valuation.per_current is not none or o.valuation.dividend_yield_current is not none or o.valuation.dpa_estimate is not none or o.valuation.p_b_estimate is not none or o.valuation.per_estimate is not none or o.valuation.dividend_yield_estimate is not none) %}
+              <div style="margin-top:14px;">
+                <div style="font-size:11px;letter-spacing:0.12em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:6px;">Ratios fondamentaux</div>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #E2E8F0;border-radius:4px;font-size:12px;">
+                  <tr style="background:#F1F5F9;">
+                    <th align="left" style="padding:6px 10px;font-weight:600;color:#64748B;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">Ratio</th>
+                    <th align="right" style="padding:6px 10px;font-weight:600;color:#64748B;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">Actuel</th>
+                    <th align="right" style="padding:6px 10px;font-weight:600;color:#64748B;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;">Estimé</th>
+                  </tr>
+                  {% if o.valuation.dpa_current is not none or o.valuation.dpa_estimate is not none %}
+                  <tr style="border-top:1px solid #E2E8F0;">
+                    <td style="padding:6px 10px;color:#1E293B;">DPA (FCFA)</td>
+                    <td align="right" style="padding:6px 10px;font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;color:#0A2540;">{{ o.valuation.dpa_current|ratio }}</td>
+                    <td align="right" style="padding:6px 10px;font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;color:#64748B;">{{ o.valuation.dpa_estimate|ratio }}</td>
+                  </tr>
+                  {% endif %}
+                  {% if o.valuation.p_b_current is not none or o.valuation.p_b_estimate is not none %}
+                  <tr style="border-top:1px solid #E2E8F0;">
+                    <td style="padding:6px 10px;color:#1E293B;">P/B</td>
+                    <td align="right" style="padding:6px 10px;font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;color:#0A2540;">{{ o.valuation.p_b_current|ratio }}</td>
+                    <td align="right" style="padding:6px 10px;font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;color:#64748B;">{{ o.valuation.p_b_estimate|ratio }}</td>
+                  </tr>
+                  {% endif %}
+                  {% if o.valuation.per_current is not none or o.valuation.per_estimate is not none %}
+                  <tr style="border-top:1px solid #E2E8F0;">
+                    <td style="padding:6px 10px;color:#1E293B;">PER</td>
+                    <td align="right" style="padding:6px 10px;font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;color:#0A2540;">{{ o.valuation.per_current|ratio }}</td>
+                    <td align="right" style="padding:6px 10px;font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;color:#64748B;">{{ o.valuation.per_estimate|ratio }}</td>
+                  </tr>
+                  {% endif %}
+                  {% if o.valuation.dividend_yield_current is not none or o.valuation.dividend_yield_estimate is not none %}
+                  <tr style="border-top:1px solid #E2E8F0;">
+                    <td style="padding:6px 10px;color:#1E293B;">Rend. Dividende</td>
+                    <td align="right" style="padding:6px 10px;font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;color:#0A2540;">{{ o.valuation.dividend_yield_current|gain_pct }}</td>
+                    <td align="right" style="padding:6px 10px;font-family:'IBM Plex Mono','SF Mono',Menlo,monospace;color:#64748B;">{{ o.valuation.dividend_yield_estimate|gain_pct }}</td>
+                  </tr>
+                  {% endif %}
+                </table>
+              </div>
+              {% endif %}
+
+              {# ============ ZONE D'ENTRÉE ============ #}
+              {% if o.price_range_min is not none and o.price_range_max is not none %}
+              <div style="margin-top:12px;font-size:12px;color:#475569;">
+                <strong style="letter-spacing:0.08em;text-transform:uppercase;font-size:10px;color:#64748B;">Zone d'entrée · </strong>
+                {{ o.price_range_min|fcfa }} — {{ o.price_range_max|fcfa }}
+              </div>
+              {% elif o.entry_zone_fcfa %}
+              <div style="margin-top:12px;font-size:12px;color:#475569;">
+                <strong style="letter-spacing:0.08em;text-transform:uppercase;font-size:10px;color:#64748B;">Zone d'entrée · </strong>
+                {{ o.entry_zone_fcfa }}
+              </div>
               {% endif %}
 
               {% if o.signals %}

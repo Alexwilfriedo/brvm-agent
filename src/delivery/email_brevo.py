@@ -59,6 +59,43 @@ _env = Environment(
 )
 
 
+def _fmt_fcfa(n: float | int | None) -> str:
+    """Formate un montant FCFA avec séparateur français (ex: '17 100 FCFA')."""
+    if n is None:
+        return "—"
+    try:
+        return f"{int(round(float(n))):,}".replace(",", " ") + " FCFA"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_gain_pct(n: float | int | None) -> str:
+    """Formate un gain en % avec signe (ex: '+14,04%')."""
+    if n is None:
+        return "—"
+    try:
+        v = float(n)
+    except (TypeError, ValueError):
+        return "—"
+    sign = "+" if v > 0 else ""
+    return f"{sign}{v:.2f}%".replace(".", ",")
+
+
+def _fmt_ratio(n: float | int | None, digits: int = 2) -> str:
+    """Formate un ratio numérique (DPA, P/B, PER…). Affiche '—' si None."""
+    if n is None:
+        return "—"
+    try:
+        return f"{float(n):.{digits}f}".replace(".", ",")
+    except (TypeError, ValueError):
+        return "—"
+
+
+_env.filters["fcfa"] = _fmt_fcfa
+_env.filters["gain_pct"] = _fmt_gain_pct
+_env.filters["ratio"] = _fmt_ratio
+
+
 # --- Design tokens (charte graphique) ---------------------------------------
 
 DIRECTION_STYLES: dict[str, dict[str, str]] = {
