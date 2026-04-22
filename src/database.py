@@ -63,6 +63,25 @@ _INLINE_MIGRATIONS: list[str] = [
     # 2026-04 (pattern C) : briefs idempotents par date + révisions versionnées.
     "ALTER TABLE briefs ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE briefs ADD COLUMN IF NOT EXISTS revised_at TIMESTAMP WITH TIME ZONE",
+    # Q-1 A/B test : payload du modèle alternatif + son nom
+    "ALTER TABLE briefs ADD COLUMN IF NOT EXISTS payload_alt JSON",
+    "ALTER TABLE briefs ADD COLUMN IF NOT EXISTS model_alt VARCHAR(64)",
+    # 2026-04 : brief hebdo (audit 7j). Default 'daily' pour ne pas casser l'historique.
+    "ALTER TABLE briefs ADD COLUMN IF NOT EXISTS brief_type VARCHAR(16) NOT NULL DEFAULT 'daily'",
+    "CREATE INDEX IF NOT EXISTS ix_briefs_brief_type ON briefs (brief_type)",
+    # Planning indépendant pour le brief hebdo.
+    "ALTER TABLE schedule_config ADD COLUMN IF NOT EXISTS weekly_cron_expression VARCHAR(64)",
+    # Fréquence par destinataire pour piloter qui reçoit daily vs weekly.
+    "ALTER TABLE recipients ADD COLUMN IF NOT EXISTS frequency VARCHAR(24) NOT NULL DEFAULT 'daily'",
+    "CREATE INDEX IF NOT EXISTS ix_recipients_frequency ON recipients (frequency)",
+    # Type de pipeline (daily/weekly) — runs historiques restent 'daily' via default.
+    "ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS pipeline_type VARCHAR(16) NOT NULL DEFAULT 'daily'",
+    "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_pipeline_type ON pipeline_runs (pipeline_type)",
+    # Backfill : les runs 'no_data' ne peuvent venir que du pipeline weekly
+    # (le daily ne retourne jamais ce statut). Corrige l'historique.
+    "UPDATE pipeline_runs SET pipeline_type = 'weekly' WHERE status = 'no_data' AND pipeline_type = 'daily'",
+    # Les runs avec summary.brief_type = 'weekly' sont aussi des weekly (success cases).
+    "UPDATE pipeline_runs SET pipeline_type = 'weekly' WHERE (summary->>'brief_type') = 'weekly' AND pipeline_type = 'daily'",
     # Note : l'unicité par date calendaire est enforçée **côté application**
     # via `_find_brief_for_date` dans pipeline.py. Un index fonctionnel
     # Postgres type `((brief_date::date))` nécessiterait que le cast soit

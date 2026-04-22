@@ -19,6 +19,26 @@ from ._retry import anthropic_retry
 
 logger = logging.getLogger(__name__)
 
+
+def _capture_llm_error(exc: BaseException, *, step: str, model: str, **tags: str) -> None:
+    """Capture une erreur LLM dans Sentry avec tags structurés (C-4).
+
+    Silencieux si Sentry n'est pas initialisé — évite tout couplage obligatoire.
+    Les tags permettent ensuite de filtrer dans Sentry : `step:enrich`,
+    `model:claude-sonnet-4-6`, etc.
+    """
+    try:
+        import sentry_sdk
+    except ImportError:
+        return
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("component", "llm")
+        scope.set_tag("step", step)
+        scope.set_tag("model", model)
+        for k, v in tags.items():
+            scope.set_tag(k, v)
+        sentry_sdk.capture_exception(exc)
+
 PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "enrichment.md"
 
 
@@ -67,15 +87,27 @@ class NewsEnricher:
             raw = self._call_llm(user_content)
         except APIError as e:
             logger.error(f"Enrichissement Anthropic échoué '{article.title[:60]}': {e}")
+            _capture_llm_error(
+                e, step="enrich", model=self.settings.model_enrichment,
+                error_kind="anthropic_api", article_url=article.url[:180],
+            )
             return {"error": f"anthropic: {e}"}
         except Exception as e:
             logger.exception(f"Enrichissement inconnu échoué '{article.title[:60]}'")
+            _capture_llm_error(
+                e, step="enrich", model=self.settings.model_enrichment,
+                error_kind="unknown", article_url=article.url[:180],
+            )
             return {"error": str(e)}
 
         try:
             return json.loads(_strip_fence(raw))
         except json.JSONDecodeError as e:
             logger.warning(f"JSON invalide pour '{article.title[:60]}': {e}")
+            _capture_llm_error(
+                e, step="enrich", model=self.settings.model_enrichment,
+                error_kind="invalid_json", article_url=article.url[:180],
+            )
             return {"error": "invalid_json", "raw": raw[:500]}
 
     def enrich_batch(self, articles: list[NewsItem]) -> list[dict]:

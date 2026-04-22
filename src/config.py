@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # Scheduler
     timezone: str = "Africa/Abidjan"
     default_cron: str = "0 8 * * *"
+    # Brief hebdo : samedi 7h Abidjan (marché BRVM fermé depuis vendredi 15h,
+    # week-end pour digestion avant lundi). NULL côté DB = weekly désactivé ;
+    # ce default est utilisé UNIQUEMENT lors du 1er seed de ScheduleConfig.
+    default_weekly_cron: str = "0 7 * * 6"
 
     # Profil investisseur
     investor_profile: str = (
@@ -90,6 +94,13 @@ class Settings(BaseSettings):
     # Misc
     log_level: str = "INFO"
     news_lookback_hours: int = 36
+
+    # Q-1 : A/B test synthèse Opus vs Sonnet (ou autre modèle alt).
+    # Quand activé, chaque brief appelle AUSSI le modèle alternatif et
+    # persiste sa réponse dans `briefs.payload_alt` + `briefs.model_alt`.
+    # Coût : ~2x l'appel synthèse tant que le test tourne. Désactive après.
+    ab_test_synthesis: bool = False
+    ab_test_model: str = "claude-sonnet-4-6"
 
     # Envoi d'un mail de test au démarrage pour valider la config Brevo sans
     # attendre le cron quotidien. À activer temporairement après un changement

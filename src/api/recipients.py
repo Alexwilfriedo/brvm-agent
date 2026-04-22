@@ -26,6 +26,7 @@ router = APIRouter(
 )
 
 Channel = Literal["email", "whatsapp"]
+Frequency = Literal["daily", "weekly", "critical_only"]
 
 # Validateurs simples — on veut attraper les fautes de frappe, pas faire du RFC 5322
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -53,6 +54,7 @@ class RecipientOut(BaseModel):
     address: str
     name: str | None
     enabled: bool
+    frequency: str
     notes: str | None
     created_at: datetime
     updated_at: datetime
@@ -63,6 +65,7 @@ class RecipientCreate(BaseModel):
     address: str
     name: str | None = None
     enabled: bool = True
+    frequency: Frequency = "daily"
     notes: str | None = None
 
     @field_validator("address")
@@ -78,6 +81,7 @@ class RecipientPatch(BaseModel):
     address: str | None = None
     name: str | None = None
     enabled: bool | None = None
+    frequency: Frequency | None = None
     notes: str | None = None
 
 
@@ -122,6 +126,7 @@ def create_recipient(body: RecipientCreate):
             address=body.address,
             name=body.name,
             enabled=body.enabled,
+            frequency=body.frequency,
             notes=body.notes,
         )
         s.add(r)
@@ -148,6 +153,8 @@ def update_recipient(recipient_id: int, body: RecipientPatch):
             r.name = body.name
         if body.enabled is not None:
             r.enabled = body.enabled
+        if body.frequency is not None:
+            r.frequency = body.frequency
         if body.notes is not None:
             r.notes = body.notes
         r.updated_at = datetime.now(UTC)

@@ -23,6 +23,7 @@ from sqlalchemy import select, text
 from . import events
 from .analysis.enrichment import NewsEnricher
 from .analysis.synthesis import BriefSynthesizer
+from .analysis.weekly_synthesis import WeeklyBriefSynthesizer
 from .collectors.base import CollectionResult, NewsItem
 from .collectors.registry import build_collector
 from .config import get_settings
@@ -71,9 +72,11 @@ def _pipeline_lock() -> Iterator[bool]:
         conn.close()
 
 
-def _start_run(trigger: str) -> int:
+def _start_run(trigger: str, pipeline_type: str = "daily") -> int:
     with get_session() as s:
-        run = PipelineRun(trigger=trigger, status="running")
+        run = PipelineRun(
+            trigger=trigger, status="running", pipeline_type=pipeline_type,
+        )
         s.add(run)
         s.flush()
         return run.id
@@ -260,7 +263,7 @@ def _run_pipeline_body(run_id: int) -> dict:
                    quotes=market_snapshot.get("quotes_count", 0),
                    tickers_with_fundamentals=len(ticker_fundamentals))
 
-    # 5. Synthèse (Opus)
+    # 5. Synthèse (modèle principal = settings.model_synthesis)
     events.publish(run_id, "step.start", step="synthesize")
     brief_json = BriefSynthesizer().synthesize(
         market_snapshot=market_snapshot,
@@ -282,12 +285,38 @@ def _run_pipeline_body(run_id: int) -> dict:
     events.publish(run_id, "step.done", step="synthesize",
                    opportunities=opp_count, failed=synthesis_failed)
 
+    # 5bis. Q-1 A/B : appel modèle alternatif si activé (pour compare blind
+    # ultérieur). Best-effort : toute erreur est absorbée pour ne pas
+    # bloquer le brief principal.
+    alt_payload: dict | None = None
+    alt_model: str | None = None
+    if settings.ab_test_synthesis and settings.ab_test_model != settings.model_synthesis:
+        alt_model = settings.ab_test_model
+        try:
+            logger.info(f"A/B Q-1 : appel modèle alternatif = {alt_model}")
+            alt_payload = BriefSynthesizer(model=alt_model).synthesize(
+                market_snapshot=market_snapshot,
+                enriched_news=enriched,
+                historical_context=historical_context,
+                ticker_fundamentals=ticker_fundamentals,
+            )
+            summary["steps"].append({
+                "step": "synthesize_alt",
+                "model": alt_model,
+                "opportunities": len(alt_payload.get("opportunities", [])),
+                "failed": bool(alt_payload.get("_error")),
+            })
+        except Exception:
+            logger.exception(f"A/B Q-1 : échec de l'appel modèle alt {alt_model}")
+            alt_payload = None
+
     # 6. Persistance du brief (upsert par date — revision > 1 sur re-run).
     # Même en cas d'échec synthèse : on persiste pour forensic + consultation
     # admin UI, mais avec delivery_status="failed_synthesis" pour signaler.
     events.publish(run_id, "step.start", step="persist_brief")
     brief_id, revision = _persist_brief(
         brief_json, now_local, synthesis_failed=synthesis_failed,
+        payload_alt=alt_payload, model_alt=alt_model,
     )
     summary["brief_id"] = brief_id
     summary["revision"] = revision
@@ -612,11 +641,19 @@ def _build_historical_context(days: int = 5) -> list[dict]:
         } for b in briefs]
 
 
-def _find_brief_for_date(session, local_date) -> Brief | None:
-    """Retourne le brief existant pour la date calendaire donnée, ou None.
+def _find_brief_for_date(
+    session,
+    local_date,
+    *,
+    brief_type: str = "daily",
+) -> Brief | None:
+    """Retourne le brief existant pour `(date calendaire, brief_type)`, ou None.
 
     On matche sur la plage journalière [local_date, local_date+1) plutôt que
-    sur l'égalité stricte (les timestamps stockés ont une heure).
+    sur l'égalité stricte (les timestamps stockés ont une heure). Le filtrage
+    par `brief_type` est crucial pour que lundi puisse porter à la fois le
+    brief daily et — potentiellement plus tard si on déplace l'horaire — un
+    brief weekly, sans collision.
     """
     from datetime import time
     # Normalise en début/fin de journée calendaire. local_date peut être un
@@ -630,6 +667,7 @@ def _find_brief_for_date(session, local_date) -> Brief | None:
         select(Brief)
         .where(Brief.brief_date >= day_start)
         .where(Brief.brief_date < day_end)
+        .where(Brief.brief_type == brief_type)
     ).scalar_one_or_none()
 
 
@@ -638,6 +676,8 @@ def _persist_brief(
     now_local: datetime,
     *,
     synthesis_failed: bool = False,
+    payload_alt: dict | None = None,
+    model_alt: str | None = None,
 ) -> tuple[int, int]:
     """Upsert du brief par date calendaire + gel des signals à la revision 1.
 
@@ -678,6 +718,10 @@ def _persist_brief(
                 existing.email_sent = False
                 existing.whatsapp_sent = False
                 existing.delivery_errors = None
+            # Q-1 : toujours overwrite le payload_alt sur révision (suit le texte)
+            if payload_alt is not None:
+                existing.payload_alt = payload_alt
+                existing.model_alt = model_alt
             s.flush()
             logger.info(f"Brief #{existing.id} mis à jour en révision {existing.revision}")
             return existing.id, existing.revision
@@ -695,6 +739,8 @@ def _persist_brief(
                 (brief_json.get("skip_reasons") or "synthesis stub")[:2000]
                 if synthesis_failed else None
             ),
+            payload_alt=payload_alt,
+            model_alt=model_alt,
         )
         s.add(brief)
         s.flush()
@@ -742,11 +788,19 @@ def _deliver(
     *,
     market_snapshot: dict | None = None,
     revision: int = 1,
+    email_recipients_override: list[tuple[str, str | None]] | None = None,
+    brief_type: str = "daily",
 ) -> dict:
     """Envoie email + WhatsApp. Met à jour Brief.delivery_status en conséquence.
 
     Si `revision > 1`, le sujet email mentionne "Révision N" et une bannière
     est affichée en tête pour que le lecteur sache que c'est une mise à jour.
+
+    Si `email_recipients_override` est fourni, l'envoi cible cette liste
+    d'adresses (mode "ciblage ad-hoc" depuis l'admin). Dans ce mode on skip
+    WhatsApp (pas de ciblage ad-hoc sur ce canal) et on ne touche PAS au
+    `delivery_status` du brief — c'est un envoi ponctuel, pas le statut
+    officiel du brief.
 
     Retourne un dict récap pour le summary du run.
     """
@@ -754,6 +808,16 @@ def _deliver(
     whatsapp_attempted = False
     whatsapp_ok = False
     errors: list[str] = []
+    sent_addresses: list[str] = []
+    is_targeted = email_recipients_override is not None
+
+    # Détermine les fréquences cibles (daily+critical selon conviction, ou all pour weekly).
+    # Bypass en mode ciblé — un envoi ad-hoc ignore les préférences destinataire.
+    from .delivery.repository import frequencies_for_brief
+    target_frequencies = (
+        None if is_targeted
+        else frequencies_for_brief(brief_type, brief_json)
+    )
 
     # Email (toujours tenté — obligatoire)
     try:
@@ -763,23 +827,29 @@ def _deliver(
             market_snapshot=market_snapshot,
             edition_num=brief_id,
             revision=revision,
+            brief_type=brief_type,
         )
-        EmailSender().send(subject, html)
+        sent_addresses = EmailSender().send(
+            subject, html,
+            recipients_override=email_recipients_override,
+            frequencies=target_frequencies,
+        )
         email_ok = True
     except Exception as e:
         errors.append(f"email: {e}")
         logger.exception("Échec envoi email")
 
-    # WhatsApp (optionnel)
-    try:
-        sender = WhatsAppSender()
-        if sender.enabled:
-            whatsapp_attempted = True
-            sender.send(brief_json)
-            whatsapp_ok = True
-    except Exception as e:
-        errors.append(f"whatsapp: {e}")
-        logger.exception("Échec envoi WhatsApp")
+    # WhatsApp (optionnel, et skipé si on cible des destinataires spécifiques)
+    if not is_targeted:
+        try:
+            sender = WhatsAppSender()
+            if sender.enabled:
+                whatsapp_attempted = True
+                sender.send(brief_json)
+                whatsapp_ok = True
+        except Exception as e:
+            errors.append(f"whatsapp: {e}")
+            logger.exception("Échec envoi WhatsApp")
 
     # Statut final
     if email_ok and (not whatsapp_attempted or whatsapp_ok):
@@ -789,20 +859,28 @@ def _deliver(
     else:
         status = "failed"
 
-    with get_session() as s:
-        brief = s.get(Brief, brief_id)
-        if brief:
-            brief.email_sent = email_ok
-            brief.whatsapp_sent = whatsapp_ok
-            brief.delivery_status = status
-            brief.delivery_errors = "; ".join(errors) if errors else None
+    # En mode ciblé : ne pas écraser le statut officiel du brief (envoi ad-hoc).
+    if not is_targeted:
+        with get_session() as s:
+            brief = s.get(Brief, brief_id)
+            if brief:
+                brief.email_sent = email_ok
+                brief.whatsapp_sent = whatsapp_ok
+                brief.delivery_status = status
+                brief.delivery_errors = "; ".join(errors) if errors else None
 
     # Si tout est cassé, on ne peut pas alerter par email (c'est justement ça qui échoue).
     # On se contente de logger + laisser Sentry capter l'exception raise'é plus haut si besoin.
     if status == "failed":
         logger.error(f"ÉCHEC LIVRAISON TOTAL brief_id={brief_id}: {errors}")
 
-    return {"status": status, "email_ok": email_ok, "whatsapp_ok": whatsapp_ok, "errors": errors}
+    return {
+        "status": status,
+        "email_ok": email_ok,
+        "whatsapp_ok": whatsapp_ok,
+        "errors": errors,
+        "sent_to": sent_addresses,
+    }
 
 
 # --- Redelivery (retry manuel depuis l'UI admin) ----------------------------
@@ -811,13 +889,22 @@ class RedeliveryError(RuntimeError):
     """Levée quand un brief ne peut pas être rejoué (stub, inexistant, etc.)."""
 
 
-def redeliver_brief(brief_id: int) -> dict:
+def redeliver_brief(
+    brief_id: int,
+    *,
+    email_recipients_override: list[tuple[str, str | None]] | None = None,
+) -> dict:
     """Rejoue la livraison email + WhatsApp pour un brief déjà persisté.
 
     Utilisé par `POST /api/briefs/{brief_id}/redeliver` quand l'envoi initial
     a échoué (ex : timeout SMTP Brevo). Ne relance PAS la synthèse Opus ni
     n'incrémente la révision — le brief reste identique, seule la livraison
     est retentée.
+
+    Si `email_recipients_override` est fourni, on envoie uniquement à cette
+    liste `(address, name)` et on ne touche pas au statut officiel du brief
+    (mode "ciblage ad-hoc" — ex : renvoyer à un nouveau destinataire ou
+    ré-essayer sur un seul qui avait échoué). WhatsApp est skipé dans ce mode.
 
     Contrairement au run cron, on ne crée pas de nouveau `PipelineRun` : la
     table `briefs` porte déjà `delivery_status` / `delivery_errors` et les
@@ -846,16 +933,438 @@ def redeliver_brief(brief_id: int) -> dict:
         brief_json = brief.payload
         brief_date_local = brief.brief_date.astimezone(tz)
         revision = brief.revision
+        brief_type = brief.brief_type
 
     date_str = format_date_fr(brief_date_local)
 
-    # Snapshot marché : on reconstruit à partir de la DB actuelle — c'est ce
-    # qui est affiché dans l'en-tête email. Si la retry a lieu quelques
-    # minutes après le run initial, le snapshot est quasi identique.
-    market_snapshot = _build_market_snapshot()
+    # Snapshot marché : pertinent uniquement pour les briefs daily (section
+    # "Top gainers/losers"). Le weekly a son propre contexte rétrospectif.
+    market_snapshot = _build_market_snapshot() if brief_type == "daily" else None
 
-    logger.info(f"Rejouer livraison brief #{brief_id} (revision {revision})")
+    mode = "ciblé" if email_recipients_override else "standard"
+    logger.info(
+        f"Rejouer livraison brief #{brief_id} ({brief_type}, "
+        f"revision {revision}, mode {mode})"
+    )
     return _deliver(
         brief_json, date_str, brief_id,
         market_snapshot=market_snapshot, revision=revision,
+        email_recipients_override=email_recipients_override,
+        brief_type=brief_type,
     )
+
+
+# ============================================================================
+# Pipeline HEBDOMADAIRE — audit 7j + scorecard P&L
+# ============================================================================
+
+WEEKLY_LOCK_KEY = "brvm_weekly_pipeline"
+
+
+def _most_recent_friday(ref: datetime) -> datetime:
+    """Retourne le dernier vendredi <= ref (même jour si ref est un vendredi).
+
+    Python weekday : lundi=0, ..., vendredi=4, samedi=5, dimanche=6.
+    """
+    # Distance jusqu'au dernier vendredi : (weekday - 4) mod 7
+    days_since_friday = (ref.weekday() - 4) % 7
+    return (ref - timedelta(days=days_since_friday)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+
+
+def _build_plays_with_pnl(
+    daily_briefs: list[Brief],
+    latest_close_by_ticker: dict[str, float],
+) -> list[dict]:
+    """Pour chaque signal des briefs daily de la fenêtre, construit une ligne
+    `play` enrichie du P&L réel (signe corrigé pour `avoid`).
+
+    Formule :
+      - `direction = buy`  : pnl_pct = (current - signal) / signal × 100
+      - `direction = avoid`: pnl_pct = (signal - current) / signal × 100  (inversé)
+      - autres (watch/hold) : pnl_pct = (current - signal) / signal × 100
+        (neutre directionnellement, mais on garde la valeur pour contexte)
+
+    Un signal sans `price_at_signal` (prix de référence manquant au moment du
+    brief) est exclu — on ne peut pas calculer de P&L fiable.
+    """
+    plays: list[dict] = []
+    for brief in daily_briefs:
+        # On préfère reconstruire depuis `payload.opportunities` plutôt que
+        # `brief.signals` — le payload porte sector/name/thesis complets
+        # qu'on voudra citer dans le weekly, là où Signal n'a que thesis.
+        issued_on = brief.brief_date.date().isoformat()
+        opps = (brief.payload or {}).get("opportunities") or []
+        # On a aussi besoin du prix au signal (stocké dans Signal, pas dans
+        # payload) — on construit un lookup par ticker.
+        price_by_ticker = {
+            s.ticker: s.price_at_signal for s in brief.signals
+            if s.price_at_signal
+        }
+        for opp in opps:
+            if not isinstance(opp, dict):
+                continue
+            ticker = (opp.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            direction = opp.get("direction", "watch")
+            # Les directions non-actionnables (watch/hold) sont incluses pour
+            # contexte narratif mais ne rentrent PAS dans le scorecard (le LLM
+            # et le reconcile les excluent via le filtre direction).
+            signal_price = price_by_ticker.get(ticker)
+            if not signal_price or signal_price <= 0:
+                continue
+            current_price = latest_close_by_ticker.get(ticker)
+            if current_price is None or current_price <= 0:
+                # Pas de quote plus récente : skip (on ne peut rien dire).
+                continue
+            raw_pnl = (current_price - signal_price) / signal_price * 100
+            if direction == "avoid":
+                raw_pnl = -raw_pnl  # inverse : baisse du titre = gain pour l'avoid
+            days_held = (datetime.now(UTC).date() - brief.brief_date.date()).days
+            plays.append({
+                "ticker": ticker,
+                "name": opp.get("name", ""),
+                "sector": opp.get("sector", ""),
+                "direction": direction,
+                "conviction": int(opp.get("conviction", 3)),
+                "issued_on": issued_on,
+                "thesis": opp.get("thesis", ""),
+                "price_at_signal": round(signal_price, 2),
+                "current_price": round(current_price, 2),
+                "realized_pnl_pct": round(raw_pnl, 2),
+                "days_held": max(0, days_held),
+            })
+    return plays
+
+
+def _build_weekly_context(
+    week_start: datetime,
+    week_end: datetime,
+) -> dict:
+    """Charge tout ce dont le WeeklyBriefSynthesizer a besoin pour la fenêtre
+    `[week_start, week_end]` (inclusif sur week_end).
+
+    Retourne un dict prêt à passer à `WeeklyBriefSynthesizer.synthesize()`.
+    """
+    # Borne supérieure exclusive pour éviter la zone grise de fin de journée.
+    upper = week_end + timedelta(days=1)
+
+    with get_session() as s:
+        # 1. Briefs daily de la semaine
+        daily_briefs = list(s.execute(
+            select(Brief)
+            .where(Brief.brief_type == "daily")
+            .where(Brief.brief_date >= week_start)
+            .where(Brief.brief_date < upper)
+            .order_by(Brief.brief_date)
+        ).scalars().all())
+
+        # 2. Dernier close par ticker (pour calculer le P&L réel)
+        # On veut le close le plus récent, pas nécessairement dans la fenêtre
+        # (le vendredi de clôture peut être après le dernier brief de la semaine).
+        quotes = s.execute(
+            select(Quote.ticker, Quote.close_price, Quote.quote_date)
+            .order_by(Quote.ticker, Quote.quote_date.desc())
+        ).all()
+        latest_close: dict[str, float] = {}
+        for ticker, close_price, _qd in quotes:
+            if ticker not in latest_close and close_price and close_price > 0:
+                latest_close[ticker] = float(close_price)
+
+        # 3. Mouvement de la semaine par ticker (open/close/volume)
+        week_quotes_rows = s.execute(
+            select(Quote.ticker, Quote.close_price, Quote.quote_date, Quote.volume)
+            .where(Quote.quote_date >= week_start)
+            .where(Quote.quote_date < upper)
+            .order_by(Quote.ticker, Quote.quote_date)
+        ).all()
+        by_ticker: dict[str, list] = {}
+        for ticker, close_price, qd, volume in week_quotes_rows:
+            by_ticker.setdefault(ticker, []).append({
+                "close": close_price, "date": qd.date().isoformat(),
+                "volume": volume or 0,
+            })
+        week_quotes = []
+        for ticker, rows in by_ticker.items():
+            if not rows:
+                continue
+            first, last = rows[0], rows[-1]
+            if not first["close"] or first["close"] <= 0:
+                continue
+            change_pct = round(
+                (last["close"] - first["close"]) / first["close"] * 100, 2,
+            )
+            week_quotes.append({
+                "ticker": ticker,
+                "open_week": round(first["close"], 2),
+                "close_week": round(last["close"], 2),
+                "change_pct": change_pct,
+                "volume_total": sum(r["volume"] for r in rows),
+            })
+        week_quotes.sort(key=lambda q: abs(q["change_pct"]), reverse=True)
+
+        # 4. News enrichies "structurelles" : on prend les articles enrichis de
+        # la semaine avec un score d'importance >= 3 (si présent dans l'enrichment)
+        # ou les tickers mentionnés >= 1 (heuristique large pour le 1er jet).
+        news_rows = list(s.execute(
+            select(NewsArticle)
+            .where(NewsArticle.enriched_at.is_not(None))
+            .where(NewsArticle.enriched_at >= week_start)
+            .where(NewsArticle.enriched_at < upper)
+            .order_by(NewsArticle.enriched_at.desc())
+            .limit(30)
+        ).scalars().all())
+        week_news = []
+        for art in news_rows:
+            enr = art.enrichment or {}
+            importance = enr.get("importance") or enr.get("relevance_score")
+            # Filtre "structurel" : importance élevée OU mention de catalyseur
+            is_structural = (
+                (isinstance(importance, (int, float)) and importance >= 3)
+                or bool(enr.get("catalysts"))
+                or bool(enr.get("regulation"))
+            )
+            if not is_structural:
+                continue
+            week_news.append({
+                "title": art.title,
+                "published_at": art.published_at.date().isoformat() if art.published_at else None,
+                "tickers": art.tickers_mentioned or [],
+                "summary": enr.get("summary", "")[:300],
+            })
+
+    # 5. plays avec P&L — en dehors de la session, pas d'I/O ici
+    plays_with_pnl = _build_plays_with_pnl(daily_briefs, latest_close)
+
+    # Représentation minimale des briefs daily pour que Opus ait le contexte
+    # narratif sans se noyer dans le détail.
+    daily_briefs_repr = [
+        {
+            "brief_id": b.id,
+            "brief_date": b.brief_date.date().isoformat(),
+            "market_regime": (b.payload or {}).get("market_regime"),
+            "market_summary": (b.payload or {}).get("market_summary", "")[:500],
+            "opportunities_count": len((b.payload or {}).get("opportunities") or []),
+        }
+        for b in daily_briefs
+    ]
+
+    return {
+        "daily_briefs": daily_briefs_repr,
+        "plays_with_pnl": plays_with_pnl,
+        "week_quotes": week_quotes[:20],  # cap anti-prompt bloat
+        "week_news": week_news,
+    }
+
+
+def run_weekly_pipeline(trigger: str = "cron", force: bool = False) -> dict:
+    """Orchestrateur du brief hebdomadaire.
+
+    Fenêtre par défaut : la semaine de trading qui vient de se terminer
+    (lundi → vendredi le plus récent). Idempotent par `(week_end_date, weekly)` —
+    un 2e appel le même samedi ne regénère pas.
+
+    `force=True` : force une nouvelle révision même si un weekly existe déjà
+    pour cette fenêtre (typiquement quand l'admin veut tester depuis l'UI).
+    """
+    settings = get_settings()
+    tz = ZoneInfo(settings.timezone)
+
+    # Lock séparé du daily : les deux pipelines peuvent tourner en parallèle
+    # (weekly samedi 7h, daily chaque matin 8h — aucun conflit en pratique).
+    conn = engine.connect()
+    try:
+        acquired = bool(
+            conn.execute(
+                text("SELECT pg_try_advisory_lock(hashtext(:k))"),
+                {"k": WEEKLY_LOCK_KEY},
+            ).scalar()
+        )
+        if not acquired:
+            logger.warning("Pipeline weekly skip — advisory lock déjà pris")
+            return {"status": "skipped_locked", "brief_id": None}
+
+        run_id = _start_run(trigger, pipeline_type="weekly")
+        try:
+            return _run_weekly_pipeline_body(run_id, tz, force=force)
+        except Exception as e:
+            logger.exception("Pipeline weekly en échec")
+            _end_run(run_id, status="failed", error=f"{type(e).__name__}: {e}",
+                     trace=traceback.format_exc())
+            events.publish(run_id, "run.done", status="failed", error=str(e))
+            events.mark_run_done(run_id)
+            raise
+    finally:
+        try:
+            conn.execute(
+                text("SELECT pg_advisory_unlock(hashtext(:k))"),
+                {"k": WEEKLY_LOCK_KEY},
+            )
+        except Exception:
+            pass
+        conn.close()
+
+
+def _run_weekly_pipeline_body(run_id: int, tz: ZoneInfo, *, force: bool) -> dict:
+    """Corps du pipeline weekly (lock déjà acquis)."""
+    now_local = datetime.now(tz)
+    week_end = _most_recent_friday(now_local)
+    week_start = (week_end - timedelta(days=4)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    # Horodatage du brief : vendredi 23h59 local — "as-of" de l'audit
+    brief_dt = week_end.replace(hour=23, minute=59, second=0)
+
+    logger.info(
+        f"Pipeline weekly #{run_id} — fenêtre {week_start.date()} → {week_end.date()}"
+    )
+    events.publish(run_id, "weekly.start",
+                   week_start=week_start.date().isoformat(),
+                   week_end=week_end.date().isoformat())
+
+    # Idempotence : si un weekly existe déjà pour ce vendredi ET qu'on ne force pas
+    with get_session() as s:
+        existing = _find_brief_for_date(s, week_end, brief_type="weekly")
+        if existing is not None and not force:
+            logger.info(
+                f"Pipeline weekly #{run_id} skip — brief hebdo #{existing.id} "
+                f"(rev {existing.revision}) déjà présent pour {week_end.date()}"
+            )
+            _end_run(run_id, status="already_generated",
+                     summary={"existing_brief_id": existing.id,
+                              "existing_revision": existing.revision,
+                              "week_start": week_start.date().isoformat(),
+                              "week_end": week_end.date().isoformat()},
+                     brief_id=existing.id)
+            events.publish(run_id, "run.done", status="already_generated",
+                           brief_id=existing.id)
+            events.mark_run_done(run_id)
+            return {
+                "run_id": run_id, "status": "already_generated",
+                "brief_id": existing.id, "revision": existing.revision,
+            }
+
+    # 1. Charge le contexte (briefs daily de la semaine + P&L réel + news + quotes)
+    ctx = _build_weekly_context(week_start, week_end)
+    events.publish(run_id, "weekly.context_built",
+                   daily_briefs=len(ctx["daily_briefs"]),
+                   plays=len(ctx["plays_with_pnl"]),
+                   week_quotes=len(ctx["week_quotes"]))
+
+    # Cas dégénéré : aucun brief daily dans la fenêtre → on ne peut pas produire
+    # un audit cohérent. On ne crée PAS de brief weekly stub (ça tromperait l'audit).
+    if not ctx["daily_briefs"]:
+        logger.warning(
+            f"Pipeline weekly #{run_id} : aucun brief daily dans la fenêtre, abort"
+        )
+        _end_run(run_id, status="no_data",
+                 summary={"week_start": week_start.date().isoformat(),
+                          "week_end": week_end.date().isoformat()})
+        events.publish(run_id, "run.done", status="no_data",
+                       message="Aucun brief daily dans la fenêtre")
+        events.mark_run_done(run_id)
+        return {"run_id": run_id, "status": "no_data", "brief_id": None}
+
+    # 2. Synthèse Opus
+    synth = WeeklyBriefSynthesizer()
+    brief_json = synth.synthesize(
+        week_start=week_start.date().isoformat(),
+        week_end=week_end.date().isoformat(),
+        daily_briefs=ctx["daily_briefs"],
+        plays_with_pnl=ctx["plays_with_pnl"],
+        week_quotes=ctx["week_quotes"],
+        week_news=ctx["week_news"],
+    )
+    synthesis_failed = bool(brief_json.get("_error"))
+    events.publish(run_id, "weekly.synthesized",
+                   plays=len(brief_json.get("plays") or []),
+                   error=synthesis_failed)
+
+    # 3. Persistance (brief_type='weekly', pas de signals — c'est un audit)
+    brief_id, revision = _persist_weekly_brief(
+        brief_json, brief_dt, synthesis_failed=synthesis_failed,
+    )
+
+    # 4. Livraison — template dédié brief_weekly_email.html.j2 (routé via brief_type).
+    date_str = format_date_fr(brief_dt)
+    delivery = {"status": "skipped", "email_ok": False, "whatsapp_ok": False, "errors": []}
+    if not synthesis_failed:
+        delivery = _deliver(
+            brief_json, date_str, brief_id,
+            market_snapshot=None,  # le weekly a son propre contexte, pas de top gainers/losers
+            revision=revision,
+            brief_type="weekly",
+        )
+    events.publish(run_id, "weekly.delivered",
+                   status=delivery["status"], email_ok=delivery["email_ok"])
+
+    _end_run(run_id, status="success",
+             summary={
+                 "brief_type": "weekly",
+                 "week_start": week_start.date().isoformat(),
+                 "week_end": week_end.date().isoformat(),
+                 "brief_id": brief_id,
+                 "revision": revision,
+                 "plays": len(brief_json.get("plays") or []),
+                 "delivery_status": delivery["status"],
+             }, brief_id=brief_id)
+    events.publish(run_id, "run.done", status="success", brief_id=brief_id)
+    events.mark_run_done(run_id)
+    return {
+        "run_id": run_id, "status": "success",
+        "brief_id": brief_id, "revision": revision,
+        "week_start": week_start.date().isoformat(),
+        "week_end": week_end.date().isoformat(),
+    }
+
+
+def _persist_weekly_brief(
+    brief_json: dict, brief_dt: datetime, *, synthesis_failed: bool,
+) -> tuple[int, int]:
+    """Persiste un brief hebdo (brief_type='weekly').
+
+    Contrairement au daily, pas de signals créés (un brief hebdo est
+    rétrospectif — les signaux d'origine sont déjà dans les briefs daily).
+    Idempotence par `(brief_dt.date(), 'weekly')` via `_find_brief_for_date`.
+    """
+    with get_session() as s:
+        existing = _find_brief_for_date(s, brief_dt, brief_type="weekly")
+        if existing:
+            existing.revision += 1
+            existing.revised_at = datetime.now(UTC)
+            existing.summary_markdown = brief_json.get("week_summary", "")
+            existing.payload = brief_json
+            existing.delivery_status = (
+                "failed_synth" if synthesis_failed else "pending"
+            )
+            existing.email_sent = False
+            existing.whatsapp_sent = False
+            existing.delivery_errors = (
+                (brief_json.get("_raw_preview") or "synthesis stub")[:2000]
+                if synthesis_failed else None
+            )
+            s.flush()
+            logger.info(
+                f"Brief hebdo #{existing.id} mis à jour en révision {existing.revision}"
+            )
+            return existing.id, existing.revision
+
+        brief = Brief(
+            brief_date=brief_dt,
+            brief_type="weekly",
+            summary_markdown=brief_json.get("week_summary", ""),
+            payload=brief_json,
+            revision=1,
+            delivery_status=(
+                "failed_synth" if synthesis_failed else "pending"
+            ),
+            delivery_errors=(
+                (brief_json.get("_raw_preview") or "synthesis stub")[:2000]
+                if synthesis_failed else None
+            ),
+        )
+        s.add(brief)
+        s.flush()
+        return brief.id, 1

@@ -34,6 +34,7 @@ class RunOut(BaseModel):
     ended_at: datetime | None
     status: str
     trigger: str
+    pipeline_type: str = "daily"
     brief_id: int | None
     error: str | None
     summary: dict
@@ -44,6 +45,9 @@ def list_runs(
     q: str | None = Query(None, description="Recherche fuzzy dans status/trigger/error"),
     status: str | None = Query(None, description="Filtre strict sur status"),
     trigger: str | None = Query(None, description="Filtre strict sur trigger"),
+    pipeline_type: str | None = Query(
+        None, description="Filtre strict sur pipeline_type : 'daily' ou 'weekly'",
+    ),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -53,6 +57,8 @@ def list_runs(
             stmt = stmt.where(PipelineRun.status == status)
         if trigger:
             stmt = stmt.where(PipelineRun.trigger == trigger)
+        if pipeline_type:
+            stmt = stmt.where(PipelineRun.pipeline_type == pipeline_type)
         if q:
             stmt = stmt.where(
                 ilike_any([

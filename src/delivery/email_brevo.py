@@ -44,9 +44,9 @@ from tenacity import (
     wait_exponential,
 )
 
-from ..analysis.schemas import BriefPayload
+from ..analysis.schemas import BriefPayload, WeeklyBriefPayload
 from ..config import get_settings
-from .repository import active_recipients
+from .repository import active_recipients, frequencies_for_brief
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +99,11 @@ _env.filters["ratio"] = _fmt_ratio
 # --- Design tokens (charte graphique) ---------------------------------------
 
 DIRECTION_STYLES: dict[str, dict[str, str]] = {
-    "buy":    {"label": "Achat",      "bg": "#059669", "fg": "#FFFFFF", "accent": "#059669"},
-    "watch":  {"label": "Surveiller", "bg": "#D97706", "fg": "#FFFFFF", "accent": "#D97706"},
-    "hold":   {"label": "Conserver",  "bg": "#475569", "fg": "#FFFFFF", "accent": "#475569"},
-    "reduce": {"label": "Alléger",    "bg": "#B45309", "fg": "#FFFFFF", "accent": "#B45309"},
-    "avoid":  {"label": "Éviter",     "bg": "#DC2626", "fg": "#FFFFFF", "accent": "#DC2626"},
+    "buy":    {"label": "Achat",      "bg": "#059669", "fg": "#FFFFFF", "accent": "#059669", "icon": "▲"},
+    "watch":  {"label": "Surveiller", "bg": "#D97706", "fg": "#FFFFFF", "accent": "#D97706", "icon": "○"},
+    "hold":   {"label": "Conserver",  "bg": "#475569", "fg": "#FFFFFF", "accent": "#475569", "icon": "−"},
+    "reduce": {"label": "Alléger",    "bg": "#B45309", "fg": "#FFFFFF", "accent": "#B45309", "icon": "▼"},
+    "avoid":  {"label": "Éviter",     "bg": "#DC2626", "fg": "#FFFFFF", "accent": "#DC2626", "icon": "✕"},
 }
 
 REGIME_STYLES: dict[str, dict[str, str]] = {
@@ -136,8 +136,31 @@ def render_email_html(
     edition_num: int | str = "001",
     app_version: str = "v0.1",
     revision: int = 1,
+    brief_type: str = "daily",
 ) -> tuple[str, str]:
-    """Retourne (sujet, html) à partir du dict JSON du brief."""
+    """Retourne (sujet, html) à partir du dict JSON du brief.
+
+    `brief_type` route vers le bon template :
+      - "daily"  → brief_email.html.j2 (opportunités forward-looking)
+      - "weekly" → brief_weekly_email.html.j2 (audit rétrospectif + scorecard)
+    """
+    if brief_type == "weekly":
+        return _render_weekly(
+            brief_raw, edition_num=edition_num, app_version=app_version,
+            revision=revision,
+        )
+    return _render_daily(
+        brief_raw, date_str,
+        market_snapshot=market_snapshot, edition_num=edition_num,
+        app_version=app_version, revision=revision,
+    )
+
+
+def _render_daily(
+    brief_raw: dict, date_str: str, *,
+    market_snapshot: dict | None, edition_num: int | str,
+    app_version: str, revision: int,
+) -> tuple[str, str]:
     brief = BriefPayload.from_raw(brief_raw)
 
     subject_prefix = f"[Révision {revision}] " if revision > 1 else ""
@@ -167,6 +190,48 @@ def render_email_html(
         brief=brief,
         snapshot=market_snapshot,
         regime=_regime_style(brief.market_regime),
+        direction_style=_direction_style,
+    )
+    return subject, html
+
+
+def _render_weekly(
+    brief_raw: dict, *,
+    edition_num: int | str, app_version: str, revision: int,
+) -> tuple[str, str]:
+    """Rendu du brief hebdo — scorecard + plays rétrospectifs."""
+    brief = WeeklyBriefPayload.from_raw(brief_raw)
+
+    subject_prefix = f"[Révision {revision}] " if revision > 1 else ""
+    # Sujet : inclut le ratio wins/total pour donner du signal dès l'inbox
+    sc = brief.scorecard
+    if brief.is_error:
+        subject = f"{subject_prefix}[DEGRADÉ] Revue BRVM · semaine du {brief.week_start}"
+    elif sc.total_calls == 0:
+        subject = f"{subject_prefix}Revue BRVM · semaine du {brief.week_start} · aucun call"
+    else:
+        subject = (
+            f"{subject_prefix}Revue BRVM · semaine du {brief.week_start}"
+            f" · {sc.wins}W/{sc.losses}L"
+        )
+
+    preheader = (
+        brief.week_summary[:140]
+        if brief.week_summary
+        else (
+            f"{sc.total_calls} calls · {sc.wins} gagnés, {sc.losses} perdus, "
+            f"{sc.pending} en attente"
+        )
+    )
+
+    template = _env.get_template("brief_weekly_email.html.j2")
+    html = template.render(
+        subject=subject,
+        preheader=preheader,
+        edition_num=edition_num,
+        app_version=app_version,
+        revision=revision,
+        brief=brief,
         direction_style=_direction_style,
     )
     return subject, html
@@ -215,20 +280,42 @@ class EmailSender:
     def __init__(self):
         self.s = get_settings()
 
-    def send(self, subject: str, html: str) -> list[str]:
+    def send(
+        self,
+        subject: str,
+        html: str,
+        recipients_override: list[tuple[str, str | None]] | None = None,
+        *,
+        frequencies: list[str] | None = None,
+    ) -> list[str]:
         """Envoie à tous les recipients email actifs. Retourne la liste
         des adresses servies.
 
+        Args:
+            recipients_override: si fourni, envoie uniquement à cette liste
+                `(address, name)` au lieu de lire `recipients` en DB. Utilisé
+                par la redelivery ciblée depuis l'admin (ex : renvoyer à un
+                seul destinataire ou à une adresse ad-hoc). Bypass le filtre
+                de fréquence — un envoi ad-hoc ignore les préférences.
+            frequencies: filtre DB par `recipients.frequency` (daily/weekly/
+                critical_only). Ignoré si `recipients_override` fourni.
+
         Raises:
-            NoRecipientError: aucun destinataire actif en DB.
+            NoRecipientError: aucun destinataire actif en DB (sans override).
             Exception: si TOUS les envois unitaires échouent après retry.
         """
-        recipients = active_recipients("email")
-        if not recipients:
-            raise NoRecipientError(
-                "Aucun recipient email actif en DB. "
-                "Ajoute-en via POST /api/recipients ou via EMAIL_TO dans .env (seed)."
-            )
+        if recipients_override is not None:
+            recipients = recipients_override
+            if not recipients:
+                raise NoRecipientError("Liste de destinataires override vide.")
+        else:
+            recipients = active_recipients("email", frequencies=frequencies)
+            if not recipients:
+                freq_hint = f" (fréquence∈{frequencies})" if frequencies else ""
+                raise NoRecipientError(
+                    f"Aucun recipient email actif{freq_hint} en DB. "
+                    "Ajoute-en via POST /api/recipients ou via EMAIL_TO dans .env (seed)."
+                )
 
         transport = self.s.email_transport.lower()
         sent: list[str] = []

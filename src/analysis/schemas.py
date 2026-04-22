@@ -117,3 +117,104 @@ class BriefPayload(BaseModel):
             return cls()
         sanitized = cls._strip_none_strings(dict(raw))
         return cls.model_validate(sanitized)
+
+
+# =============================================================================
+# Brief HEBDOMADAIRE — audit 7j + scorecard P&L réel
+# =============================================================================
+
+Outcome = Literal["won", "lost", "pending"]
+
+
+class Play(BaseModel):
+    """Un signal émis pendant la semaine, enrichi de son P&L réel.
+
+    Contrairement à `Opportunity` (daily, forward-looking), `Play` est
+    backward-looking : on sait déjà ce qu'il a rendu entre `price_at_signal`
+    et le cours de clôture de la semaine.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    ticker: str
+    name: str = ""
+    sector: str = ""
+    direction: Direction = "watch"
+    conviction: int = Field(default=3, ge=1, le=5)
+    # Date du brief daily qui a émis ce signal (YYYY-MM-DD en ISO)
+    issued_on: str = ""
+    price_at_signal: float | None = None
+    current_price: float | None = None
+    # P&L réalisé en % (signe inversé pour direction='avoid' — un -5% sur un avoid = gain)
+    realized_pnl_pct: float | None = None
+    outcome: Outcome = "pending"
+    # Leçon apprise si le call a raté (Opus l'écrit en post-analyse)
+    lesson: str = ""
+    # Thèse originale, copiée depuis le brief daily (contexte de lecture)
+    thesis: str = ""
+
+
+class WeeklyScorecard(BaseModel):
+    """Statistiques agrégées de la semaine."""
+    model_config = ConfigDict(extra="ignore")
+
+    total_calls: int = 0
+    wins: int = 0
+    losses: int = 0
+    pending: int = 0
+    # P&L moyen réalisé (%) sur les calls clos (won+lost) — signe corrigé pour avoid
+    avg_realized_pnl_pct: float | None = None
+    # Meilleur et pire call (pour mise en avant)
+    best_ticker: str | None = None
+    best_pnl_pct: float | None = None
+    worst_ticker: str | None = None
+    worst_pnl_pct: float | None = None
+
+
+class WeeklyBriefPayload(BaseModel):
+    """Brief hebdomadaire : audit des recos + outlook semaine suivante.
+
+    Philosophiquement différent du daily : pas de nouveaux signaux, uniquement
+    une revue de performance + preview des catalyseurs à venir. Le lecteur type
+    est un expert/sponsor qui audite la qualité du système, pas un trader qui
+    agit dessus.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    # Fenêtre couverte (ISO YYYY-MM-DD)
+    week_start: str = ""
+    week_end: str = ""
+    # Régime de marché dominant sur la semaine
+    market_regime: Regime | None = None
+    # Résumé narratif de la semaine (marché global, rotation sectorielle…)
+    week_summary: str = Field(default="")
+    # Scorecard agrégé
+    scorecard: WeeklyScorecard = Field(default_factory=WeeklyScorecard)
+    # Calls émis, triés par conviction/P&L côté prompt
+    plays: list[Play] = Field(default_factory=list)
+    # News structurelles (réglementation, résultats majeurs, M&A) — pas le bruit quotidien
+    structural_news: list[str] = Field(default_factory=list)
+    # Catalyseurs connus pour la semaine à venir (ex-dates, publications, AG)
+    week_ahead_catalysts: list[str] = Field(default_factory=list)
+    # Watchlist updates (titres sortis, entrés, commentaires)
+    watchlist_updates: list[str] = Field(default_factory=list)
+
+    # Flag interne si la synthèse a échoué
+    is_error: bool = Field(default=False, alias="_error")
+    error_preview: str = Field(default="", alias="_raw_preview")
+
+    @classmethod
+    def _strip_none_strings(cls, v: dict) -> dict:
+        """Coerce les string fields à '' si Opus les a retournés à null."""
+        if not isinstance(v, dict):
+            return v
+        for key in ("week_summary", "week_start", "week_end"):
+            if v.get(key) is None:
+                v[key] = ""
+        return v
+
+    @classmethod
+    def from_raw(cls, raw: dict | None) -> WeeklyBriefPayload:
+        if not raw:
+            return cls()
+        sanitized = cls._strip_none_strings(dict(raw))
+        return cls.model_validate(sanitized)

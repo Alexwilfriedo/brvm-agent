@@ -103,6 +103,12 @@ class Brief(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     brief_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    # "daily" (défaut) | "weekly" — discriminant du type de brief.
+    # L'unicité applicative (`_find_brief_for_date`) s'applique par `(date, brief_type)`,
+    # donc un lundi peut porter un brief daily ET un brief weekly sans conflit.
+    brief_type: Mapped[str] = mapped_column(
+        String(16), default="daily", nullable=False, index=True,
+    )
     summary_markdown: Mapped[str] = mapped_column(Text)
     # JSON structuré complet produit par Opus (évolue avec les révisions)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -116,6 +122,10 @@ class Brief(Base):
     # (failed_synth = synthèse en échec D-5, livraison volontairement skippée)
     delivery_status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     delivery_errors: Mapped[str | None] = mapped_column(Text)
+    # Q-1 A/B test : payload produit par le modèle alternatif (Sonnet si principal
+    # Opus). NULL quand ab_test_synthesis=False ou si l'appel alt a échoué.
+    payload_alt: Mapped[dict | None] = mapped_column(JSON)
+    model_alt: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     signals: Mapped[list["Signal"]] = relationship(back_populates="brief", cascade="all, delete-orphan")
@@ -187,11 +197,19 @@ class Trade(Base):
 
 
 class ScheduleConfig(Base):
-    """Config du scheduler (modifiable via API)."""
+    """Config du scheduler (modifiable via API).
+
+    Single-row : un seul enregistrement pilote le brief daily ET le brief hebdo.
+    - `cron_expression` : brief daily (obligatoire, default '0 8 * * *' Abidjan)
+    - `weekly_cron_expression` : brief hebdo (nullable — si NULL, weekly désactivé)
+    - `enabled` : master-switch, désactive les DEUX schedules
+    """
     __tablename__ = "schedule_config"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     cron_expression: Mapped[str] = mapped_column(String(64))
+    # null = pas de brief hebdo. Default applicatif recommandé : '0 7 * * 6' (samedi 7h Abidjan).
+    weekly_cron_expression: Mapped[str | None] = mapped_column(String(64))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -209,8 +227,13 @@ class PipelineRun(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # "running" | "success" | "failed" | "skipped_locked"
+    # "running" | "success" | "failed" | "skipped_locked" | "already_generated" | "no_data"
     status: Mapped[str] = mapped_column(String(24), default="running", index=True)
+    # "daily" | "weekly" — quel pipeline a produit ce run. Default "daily" pour
+    # rétro-compat avec les runs historiques créés avant cette colonne.
+    pipeline_type: Mapped[str] = mapped_column(
+        String(16), default="daily", nullable=False, index=True,
+    )
     trigger: Mapped[str] = mapped_column(String(16), default="cron")  # "cron" | "manual"
     brief_id: Mapped[int | None] = mapped_column(ForeignKey("briefs.id", ondelete="SET NULL"))
     error: Mapped[str | None] = mapped_column(Text)
@@ -234,6 +257,15 @@ class Recipient(Base):
     address: Mapped[str] = mapped_column(String(255))  # email ou numéro E.164
     name: Mapped[str | None] = mapped_column(String(128))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    # Fréquence de réception. Gouverne le filtrage côté livraison :
+    #   - "daily"         : reçoit tous les briefs daily + le weekly (power user)
+    #   - "weekly"        : reçoit uniquement le brief hebdomadaire (expert / conseil)
+    #   - "critical_only" : reçoit le daily UNIQUEMENT si une opportunité a conviction ≥ 4,
+    #                       + tous les weekly (silence-par-défaut)
+    # Default "daily" pour backward compat — aucun recipient existant n'est coupé.
+    frequency: Mapped[str] = mapped_column(
+        String(24), default="daily", nullable=False, index=True,
+    )
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

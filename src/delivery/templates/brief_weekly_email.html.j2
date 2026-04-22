@@ -1,0 +1,343 @@
+{#
+  Template email — Brief HEBDOMADAIRE BRVM (audit 7j)
+  =====================================================
+
+  Structure distincte du daily :
+    - Scorecard en header (wins / losses / pending / avg P&L)
+    - Plays listés avec outcome + lesson (pour les lost)
+    - Week ahead (catalyseurs) + news structurelles + watchlist
+    - Pas de price_target / entry_zone — c'est rétrospectif
+
+  Compatibilité email : même stack que le daily (Lexend + Segoe UI fallback
+  MSO, tables pour structure critique, max-width 640px).
+#}
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="fr">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light">
+<title>{{ subject }}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700&display=swap');
+  body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+  table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+  img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+  body { margin: 0 !important; padding: 0 !important; width: 100% !important; background: #FAFAF7; }
+  body, td, div, p, span, a, li, h1, h2, h3, h4 {
+    font-family: 'Lexend', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  }
+  @media only screen and (max-width: 640px) {
+    .container { width: 100% !important; max-width: 100% !important; }
+    .px-outer { padding-left: 20px !important; padding-right: 20px !important; }
+    .stack-mobile { display: block !important; width: 100% !important; padding: 8px 0 !important; }
+    .hide-mobile { display: none !important; }
+    .h1 { font-size: 22px !important; line-height: 1.25 !important; }
+  }
+</style>
+<!--[if mso]>
+<style type="text/css">
+  body, td, div, p, span, a, li, h1, h2, h3, h4 { font-family: 'Segoe UI', Arial, sans-serif !important; }
+</style>
+<![endif]-->
+</head>
+<body style="margin:0;padding:0;background:#FAFAF7;font-family:'Lexend',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#1E293B;">
+
+<div style="display:none;font-size:1px;color:#FAFAF7;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">
+{{ preheader }}
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#FAFAF7;">
+<tr>
+<td align="center" class="px-outer" style="padding:32px 16px;">
+
+  <table role="presentation" class="container" width="640" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;width:100%;background:#ffffff;border:1px solid #E2E8F0;border-radius:12px;overflow:hidden;">
+
+    {# ============ HEADER : BRVM · WEEKLY AUDIT ============ #}
+    <tr>
+      <td style="padding:28px 32px 20px;border-bottom:1px solid #E2E8F0;background:#0A2540;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td align="left" valign="middle">
+              <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:13px;letter-spacing:0.22em;color:#C9A961;text-transform:uppercase;font-weight:600;">
+                BRVM · Weekly Audit
+              </div>
+              <div style="margin-top:6px;font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:22px;color:#ffffff;line-height:1.2;" class="h1">
+                Revue hebdomadaire
+              </div>
+              <div style="margin-top:6px;font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:12px;color:#94A3B8;">
+                Semaine du {{ brief.week_start }} au {{ brief.week_end }}
+              </div>
+            </td>
+            <td align="right" valign="top" class="hide-mobile" style="font-size:11px;color:#94A3B8;letter-spacing:0.08em;text-transform:uppercase;">
+              Édition {{ edition_num }}{% if revision and revision > 1 %} · Rév. {{ revision }}{% endif %}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+
+    {# ============ REVISION BANNER ============ #}
+    {% if revision and revision > 1 %}
+    <tr>
+      <td style="padding:16px 32px 0;">
+        <div style="padding:10px 14px;background:#FEF3C7;border:1px solid #FDE68A;border-radius:4px;font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:12px;color:#78350F;line-height:1.5;">
+          <strong style="letter-spacing:0.08em;text-transform:uppercase;">Révision {{ revision }}</strong> — Audit mis à jour.
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ SCORECARD ============ #}
+    {% set sc = brief.scorecard %}
+    {% set avg_color = '#059669' if (sc.avg_realized_pnl_pct is not none and sc.avg_realized_pnl_pct > 0) else ('#DC2626' if (sc.avg_realized_pnl_pct is not none and sc.avg_realized_pnl_pct < 0) else '#64748B') %}
+    <tr>
+      <td style="padding:24px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:0.14em;color:#64748B;text-transform:uppercase;font-weight:700;margin-bottom:10px;">
+          Scorecard de la semaine
+        </div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#F1F5F9;border:1px solid #E2E8F0;border-radius:6px;">
+          <tr>
+            <td class="stack-mobile" width="25%" align="center" style="padding:14px 10px;border-right:1px solid #E2E8F0;">
+              <div style="font-size:10px;letter-spacing:0.1em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Calls</div>
+              <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;font-size:22px;font-weight:700;color:#0A2540;">{{ sc.total_calls }}</div>
+            </td>
+            <td class="stack-mobile" width="25%" align="center" style="padding:14px 10px;border-right:1px solid #E2E8F0;">
+              <div style="font-size:10px;letter-spacing:0.1em;color:#059669;text-transform:uppercase;font-weight:700;margin-bottom:4px;">Gagnés</div>
+              <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;font-size:22px;font-weight:700;color:#059669;">{{ sc.wins }}</div>
+            </td>
+            <td class="stack-mobile" width="25%" align="center" style="padding:14px 10px;border-right:1px solid #E2E8F0;">
+              <div style="font-size:10px;letter-spacing:0.1em;color:#DC2626;text-transform:uppercase;font-weight:700;margin-bottom:4px;">Perdus</div>
+              <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;font-size:22px;font-weight:700;color:#DC2626;">{{ sc.losses }}</div>
+            </td>
+            <td class="stack-mobile" width="25%" align="center" style="padding:14px 10px;">
+              <div style="font-size:10px;letter-spacing:0.1em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:4px;">En attente</div>
+              <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;font-size:22px;font-weight:700;color:#64748B;">{{ sc.pending }}</div>
+            </td>
+          </tr>
+          {% if sc.avg_realized_pnl_pct is not none %}
+          <tr>
+            <td colspan="4" style="padding:12px 18px;border-top:1px solid #E2E8F0;background:#ffffff;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="left" style="font-size:12px;color:#475569;">
+                    <strong style="letter-spacing:0.08em;text-transform:uppercase;font-size:10px;color:#64748B;">P&L moyen · </strong>
+                    <span style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;font-weight:700;color:{{ avg_color }};">{{ sc.avg_realized_pnl_pct|gain_pct }}</span>
+                  </td>
+                  <td align="right" style="font-size:11px;color:#64748B;">
+                    {% if sc.best_ticker %}
+                    <span style="color:#059669;font-weight:600;">▲ {{ sc.best_ticker }}</span>
+                    <span style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;">{{ sc.best_pnl_pct|gain_pct }}</span>
+                    {% endif %}
+                    {% if sc.best_ticker and sc.worst_ticker %} · {% endif %}
+                    {% if sc.worst_ticker %}
+                    <span style="color:#DC2626;font-weight:600;">▼ {{ sc.worst_ticker }}</span>
+                    <span style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;">{{ sc.worst_pnl_pct|gain_pct }}</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          {% endif %}
+        </table>
+      </td>
+    </tr>
+
+    {# ============ WEEK SUMMARY ============ #}
+    {% if brief.week_summary %}
+    <tr>
+      <td style="padding:24px 32px 0;">
+        <div style="border-left:3px solid #C9A961;padding:4px 0 4px 16px;">
+          <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:11px;color:#64748B;letter-spacing:0.14em;text-transform:uppercase;font-weight:700;margin-bottom:6px;">
+            Contexte marché
+          </div>
+          <div style="font-size:14px;line-height:1.6;color:#1E293B;">
+            {{ brief.week_summary }}
+          </div>
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ PLAYS ============ #}
+    {% if brief.plays %}
+    <tr>
+      <td style="padding:28px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:18px;color:#0A2540;margin-bottom:4px;">
+          Détail des calls
+        </div>
+        <div style="font-size:12px;color:#64748B;margin-bottom:16px;">
+          {{ brief.plays|length }} signal{{ 'aux' if brief.plays|length > 1 else '' }} émis pendant la semaine · P&L au {{ brief.week_end }}
+        </div>
+      </td>
+    </tr>
+    {% for p in brief.plays %}
+    {% set outcome_color = '#059669' if p.outcome == 'won' else ('#DC2626' if p.outcome == 'lost' else '#64748B') %}
+    {% set outcome_bg = '#DCFCE7' if p.outcome == 'won' else ('#FEE2E2' if p.outcome == 'lost' else '#F1F5F9') %}
+    {% set outcome_label = 'Gagné' if p.outcome == 'won' else ('Perdu' if p.outcome == 'lost' else 'En attente') %}
+    {% set pnl_color = '#059669' if (p.realized_pnl_pct is not none and p.realized_pnl_pct > 0) else ('#DC2626' if (p.realized_pnl_pct is not none and p.realized_pnl_pct < 0) else '#64748B') %}
+    {% set dir_style = direction_style(p.direction) %}
+    <tr>
+      <td style="padding:0 32px 12px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;border-left:4px solid {{ outcome_color }};overflow:hidden;">
+
+          {# Header ticker + outcome #}
+          <tr>
+            <td style="padding:14px 18px;border-bottom:1px solid #E2E8F0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td valign="top">
+                    <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:16px;font-weight:700;color:#0A2540;line-height:1.3;">
+                      {{ p.ticker }}{% if p.name %}<span style="font-weight:400;color:#64748B;font-size:14px;"> — {{ p.name }}</span>{% endif %}
+                      {% if p.sector %}
+                      <span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#F1F5F9;border:1px solid #E2E8F0;border-radius:10px;font-size:10px;font-weight:600;color:#475569;letter-spacing:0.03em;vertical-align:middle;">{{ p.sector }}</span>
+                      {% endif %}
+                    </div>
+                    <div style="margin-top:4px;font-size:11px;color:#64748B;">
+                      {{ dir_style.label }} émis le {{ p.issued_on }}{% if p.days_held is defined and p.days_held is not none %} · {{ p.days_held }} jour{{ 's' if p.days_held > 1 else '' }} écoulé{{ 's' if p.days_held > 1 else '' }}{% endif %}
+                    </div>
+                  </td>
+                  <td align="right" valign="top" style="white-space:nowrap;padding-left:8px;">
+                    <span style="display:inline-block;padding:4px 10px;background:{{ outcome_bg }};color:{{ outcome_color }};border-radius:4px;font-size:11px;font-weight:700;letter-spacing:0.06em;">
+                      {{ outcome_label }}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          {# Bloc prix avec P&L réel #}
+          {% if p.price_at_signal is not none or p.current_price is not none or p.realized_pnl_pct is not none %}
+          <tr>
+            <td style="padding:0;background:#F1F5F9;border-bottom:1px solid #E2E8F0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td width="33%" align="left" valign="top" style="padding:12px 14px;">
+                    <div style="font-size:10px;letter-spacing:0.1em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Cours au signal</div>
+                    <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;font-size:14px;color:#0A2540;">{{ p.price_at_signal|fcfa }}</div>
+                  </td>
+                  <td width="33%" align="left" valign="top" style="padding:12px 14px;">
+                    <div style="font-size:10px;letter-spacing:0.1em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Cours actuel</div>
+                    <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;font-size:14px;color:#0A2540;">{{ p.current_price|fcfa }}</div>
+                  </td>
+                  <td width="34%" align="left" valign="top" style="padding:12px 14px;">
+                    <div style="font-size:10px;letter-spacing:0.1em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:4px;">P&L réalisé</div>
+                    <div style="font-family:'IBM Plex Mono','SF Mono',Menlo,Consolas,monospace;font-size:18px;font-weight:700;color:{{ pnl_color }};">{{ p.realized_pnl_pct|gain_pct }}</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          {% endif %}
+
+          {# Thèse d'origine + leçon si lost #}
+          <tr>
+            <td style="padding:14px 18px 16px;">
+              {% if p.thesis %}
+              <div style="font-size:10px;letter-spacing:0.1em;color:#64748B;text-transform:uppercase;font-weight:600;margin-bottom:4px;">Thèse d'origine</div>
+              <p style="margin:0 0 10px;font-size:13px;line-height:1.55;color:#475569;font-style:italic;">{{ p.thesis }}</p>
+              {% endif %}
+              {% if p.lesson %}
+              <div style="margin-top:10px;padding:10px 12px;background:#FEF3C7;border:1px solid #FDE68A;border-radius:4px;">
+                <div style="font-size:10px;letter-spacing:0.1em;color:#92400E;text-transform:uppercase;font-weight:700;margin-bottom:4px;">Leçon</div>
+                <div style="font-size:13px;line-height:1.55;color:#78350F;">{{ p.lesson }}</div>
+              </div>
+              {% endif %}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+    {% endfor %}
+    {% endif %}
+
+    {# ============ NEWS STRUCTURELLES ============ #}
+    {% if brief.structural_news %}
+    <tr>
+      <td style="padding:20px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:16px;color:#0A2540;margin-bottom:10px;">
+          News structurelles
+        </div>
+        <ul style="margin:0;padding-left:18px;font-size:13px;color:#334155;line-height:1.7;">
+          {% for n in brief.structural_news %}<li>{{ n }}</li>{% endfor %}
+        </ul>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ WEEK AHEAD ============ #}
+    {% if brief.week_ahead_catalysts %}
+    <tr>
+      <td style="padding:24px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:16px;color:#0A2540;margin-bottom:10px;">
+          Semaine à venir
+        </div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#F1F5F9;border:1px solid #E2E8F0;border-radius:6px;">
+          <tr>
+            <td style="padding:14px 18px;">
+              <ul style="margin:0;padding-left:18px;font-size:13px;color:#0A2540;line-height:1.7;">
+                {% for c in brief.week_ahead_catalysts %}<li>{{ c }}</li>{% endfor %}
+              </ul>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ WATCHLIST UPDATES ============ #}
+    {% if brief.watchlist_updates %}
+    <tr>
+      <td style="padding:24px 32px 0;">
+        <div style="font-family:'Lexend',-apple-system,Helvetica,Arial,sans-serif;font-size:14px;color:#0A2540;margin-bottom:8px;">
+          Watchlist — évolutions
+        </div>
+        <ul style="margin:0;padding-left:18px;font-size:13px;color:#334155;line-height:1.65;">
+          {% for w in brief.watchlist_updates %}<li>{{ w }}</li>{% endfor %}
+        </ul>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ ERROR BANNER ============ #}
+    {% if brief.is_error %}
+    <tr>
+      <td style="padding:20px 32px 0;">
+        <div style="padding:14px 18px;background:#FEE2E2;border:1px solid #FCA5A5;border-radius:6px;color:#7F1D1D;font-size:13px;line-height:1.5;">
+          ⚠ La synthèse hebdomadaire a échoué. Audit incomplet — voir logs.
+        </div>
+      </td>
+    </tr>
+    {% endif %}
+
+    {# ============ FOOTER ============ #}
+    <tr>
+      <td style="padding:32px;border-top:1px solid #E2E8F0;background:#F8FAFC;">
+        <div style="font-size:11px;line-height:1.65;color:#64748B;">
+          Audit hebdomadaire généré automatiquement par <strong style="color:#0A2540;">BRVM Agent</strong>.
+          <strong>Aucun nouveau signal d'investissement n'est émis ici</strong> — cette revue rétrospective a pour objet
+          de mesurer la pertinence des recommandations quotidiennes. Les performances passées ne préjugent pas des performances futures.
+          Consulte toujours un conseiller financier agréé avant d'engager des fonds.
+        </div>
+      </td>
+    </tr>
+
+  </table>
+
+  <div style="margin-top:18px;font-size:11px;color:#94A3B8;letter-spacing:0.06em;">
+    Semaine {{ brief.week_start }} — {{ brief.week_end }} · Abidjan · {{ app_version }}
+  </div>
+
+</td>
+</tr>
+</table>
+
+</body>
+</html>

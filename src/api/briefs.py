@@ -1,8 +1,8 @@
 """Endpoints de consultation : briefs et signaux historiques."""
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import String, cast, select
 
 from ..database import get_session
@@ -28,6 +28,7 @@ class SignalOut(BaseModel):
 class BriefSummaryOut(BaseModel):
     id: int
     brief_date: datetime
+    brief_type: str = "daily"
     summary_markdown: str
     email_sent: bool
     whatsapp_sent: bool
@@ -43,6 +44,7 @@ class BriefSummaryOut(BaseModel):
 class BriefDetailOut(BaseModel):
     id: int
     brief_date: datetime
+    brief_type: str = "daily"
     summary_markdown: str
     payload: dict
     signals: list[SignalOut]
@@ -52,6 +54,10 @@ class BriefDetailOut(BaseModel):
     delivery_errors: str | None
     revision: int = 1
     revised_at: datetime | None = None
+    # Q-1 A/B : payload produit par le modèle alternatif (Sonnet si principal Opus).
+    # Null quand le test A/B est désactivé ou que l'appel alt a échoué.
+    payload_alt: dict | None = None
+    model_alt: str | None = None
 
     class Config:
         from_attributes = True
@@ -61,6 +67,9 @@ class BriefDetailOut(BaseModel):
 def list_briefs(
     q: str | None = Query(None, description="Recherche fuzzy dans summary"),
     delivery_status: str | None = Query(None),
+    brief_type: str | None = Query(
+        None, description="Filtre par type : 'daily' ou 'weekly'. Omis = tous.",
+    ),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
@@ -73,6 +82,8 @@ def list_briefs(
         )
         if delivery_status:
             stmt = stmt.where(Brief.delivery_status == delivery_status)
+        if brief_type:
+            stmt = stmt.where(Brief.brief_type == brief_type)
         if q:
             stmt = stmt.where(ilike_any([cast(Brief.summary_markdown, String)], q))
         items, total = paginate(s, stmt, limit=limit, offset=offset)
@@ -81,6 +92,7 @@ def list_briefs(
                 BriefSummaryOut(
                     id=b.id,
                     brief_date=b.brief_date,
+                    brief_type=b.brief_type,
                     summary_markdown=b.summary_markdown,
                     email_sent=b.email_sent,
                     whatsapp_sent=b.whatsapp_sent,
@@ -106,6 +118,7 @@ def get_today_brief():
     n'existe pour aujourd'hui.
     """
     from datetime import UTC, datetime, timedelta
+
     from sqlalchemy.orm import selectinload
     now = datetime.now(UTC)
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -124,6 +137,7 @@ def get_today_brief():
         return BriefDetailOut(
             id=brief.id,
             brief_date=brief.brief_date,
+            brief_type=brief.brief_type,
             summary_markdown=brief.summary_markdown,
             payload=brief.payload,
             signals=[SignalOut.model_validate(sig) for sig in brief.signals],
@@ -133,6 +147,8 @@ def get_today_brief():
             delivery_errors=brief.delivery_errors,
             revision=brief.revision,
             revised_at=brief.revised_at,
+            payload_alt=brief.payload_alt,
+            model_alt=brief.model_alt,
         )
 
 
@@ -145,6 +161,7 @@ def get_brief(brief_id: int):
         return BriefDetailOut(
             id=brief.id,
             brief_date=brief.brief_date,
+            brief_type=brief.brief_type,
             summary_markdown=brief.summary_markdown,
             payload=brief.payload,
             signals=[SignalOut.model_validate(sig) for sig in brief.signals],
@@ -154,6 +171,8 @@ def get_brief(brief_id: int):
             delivery_errors=brief.delivery_errors,
             revision=brief.revision,
             revised_at=brief.revised_at,
+            payload_alt=brief.payload_alt,
+            model_alt=brief.model_alt,
         )
 
 
@@ -163,10 +182,35 @@ class RedeliverOut(BaseModel):
     email_ok: bool
     whatsapp_ok: bool
     errors: list[str]
+    sent_to: list[str] = Field(default_factory=list)
+
+
+class RecipientOverride(BaseModel):
+    """Destinataire ciblé pour une re-livraison ad-hoc."""
+    email: EmailStr
+    name: str | None = Field(default=None, max_length=120)
+
+
+class RedeliverIn(BaseModel):
+    """Body optionnel de `POST /api/briefs/{id}/redeliver`.
+
+    Si `recipients` est fourni et non vide, on envoie uniquement à cette
+    liste (mode "ciblage ad-hoc" : WhatsApp skipé, delivery_status du brief
+    non modifié). Sinon comportement standard : tous les destinataires actifs
+    en DB + WhatsApp si activé.
+    """
+    recipients: list[RecipientOverride] | None = Field(
+        default=None,
+        max_length=50,
+        description="Max 50 destinataires ad-hoc (anti-abus).",
+    )
 
 
 @router.post("/{brief_id}/redeliver", response_model=RedeliverOut)
-def redeliver(brief_id: int) -> RedeliverOut:
+def redeliver(
+    brief_id: int,
+    body: RedeliverIn | None = Body(default=None),
+) -> RedeliverOut:
     """Rejoue email + WhatsApp pour un brief déjà synthétisé.
 
     Typiquement utilisé depuis la vue Run quand l'envoi initial a échoué
@@ -175,11 +219,31 @@ def redeliver(brief_id: int) -> RedeliverOut:
     `briefs.delivery_status` / `delivery_errors` / `email_sent` /
     `whatsapp_sent`.
 
+    Body optionnel `{recipients: [{email, name?}, ...]}` pour cibler des
+    destinataires spécifiques (ex : renvoyer à une seule personne ou à une
+    adresse ad-hoc). Dans ce mode, WhatsApp est skipé et le statut officiel
+    du brief n'est pas modifié.
+
     Attention : peut bloquer jusqu'à ~30s si SMTP Brevo est injoignable —
     le client doit afficher un loader.
     """
+    override: list[tuple[str, str | None]] | None = None
+    if body and body.recipients:
+        # Dédup case-insensitive sur l'email tout en préservant l'ordre.
+        seen: set[str] = set()
+        deduped: list[tuple[str, str | None]] = []
+        for r in body.recipients:
+            key = r.email.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((r.email, r.name))
+        if not deduped:
+            raise HTTPException(status_code=400, detail="Liste de destinataires vide après déduplication.")
+        override = deduped
+
     try:
-        result = redeliver_brief(brief_id)
+        result = redeliver_brief(brief_id, email_recipients_override=override)
     except RedeliveryError as exc:
         # 404 si le brief n'existe pas, 409 sinon (état incompatible).
         msg = str(exc)

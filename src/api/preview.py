@@ -21,7 +21,7 @@ from ..config import get_settings
 from ..database import get_session
 from ..dates import format_date_fr
 from ..delivery.email_brevo import render_email_html
-from ..delivery.sample_brief import sample_brief, sample_snapshot
+from ..delivery.sample_brief import sample_brief, sample_snapshot, sample_weekly_brief
 from ..models import Brief
 from .deps import require_admin
 
@@ -38,11 +38,26 @@ def _today_fr() -> str:
 def preview_sample_brief(
     variant: str = Query(
         "full",
-        pattern="^(full|empty|error)$",
-        description="full = brief complet, empty = sans opportunité, error = synthèse dégradée",
+        pattern="^(full|empty|error|weekly)$",
+        description=(
+            "full = brief daily complet, empty = daily sans opportunité, "
+            "error = synthèse dégradée, weekly = brief hebdomadaire d'audit"
+        ),
     ),
 ):
     """Prévisualise le template email avec un brief d'exemple."""
+    if variant == "weekly":
+        # Audit hebdo — utilise le template dédié brief_weekly_email.html.j2.
+        brief = sample_weekly_brief()
+        _subject, html = render_email_html(
+            brief,
+            _today_fr(),  # date_str inutilisé en weekly (le template lit week_start/end)
+            market_snapshot=None,
+            edition_num="PREVIEW",
+            brief_type="weekly",
+        )
+        return HTMLResponse(html)
+
     if variant == "empty":
         brief = {
             "market_summary": "Marché en consolidation, volumes faibles. Aucun catalyseur identifié.",
@@ -95,12 +110,14 @@ def preview_stored_brief(brief_id: int):
             raise HTTPException(status_code=404, detail="Brief introuvable")
         date_str = format_date_fr(brief.brief_date.astimezone(tz))
         payload = brief.payload or {}
+        brief_type = brief.brief_type
 
     _subject, html = render_email_html(
         payload,
         date_str,
         market_snapshot=None,
         edition_num=brief_id,
+        brief_type=brief_type,
     )
     return HTMLResponse(html)
 
@@ -109,9 +126,10 @@ def preview_stored_brief(brief_id: int):
 def preview_index():
     """Index simple listant les variantes."""
     items = [
-        ("/preview/brief?variant=full",  "Brief complet (3 opportunités + snapshot + alertes)"),
-        ("/preview/brief?variant=empty", "Brief sans opportunité (honnêteté analyste)"),
-        ("/preview/brief?variant=error", "Brief dégradé (synthèse LLM échouée)"),
+        ("/preview/brief?variant=full",   "Daily complet (3 opportunités + snapshot + alertes)"),
+        ("/preview/brief?variant=empty",  "Daily sans opportunité (honnêteté analyste)"),
+        ("/preview/brief?variant=error",  "Daily dégradé (synthèse LLM échouée)"),
+        ("/preview/brief?variant=weekly", "Hebdomadaire — audit 7j (scorecard + plays + leçons)"),
     ]
     rows = "".join(
         f'<li><a href="{href}" style="color:#0A2540;">{label}</a></li>'

@@ -70,6 +70,7 @@ class SourceOut(BaseModel):
     last_collected_at: datetime | None
     last_status: str | None
     last_error: str | None
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -105,6 +106,15 @@ def list_sources(
             limit=limit,
             offset=offset,
         )
+
+
+@router.get("/{source_id}", response_model=SourceOut)
+def get_source(source_id: int):
+    with get_session() as s:
+        src = s.get(Source, source_id)
+        if not src:
+            raise HTTPException(status_code=404, detail="Source introuvable")
+        return SourceOut.model_validate(src)
 
 
 @router.post("", response_model=SourceOut, status_code=201)
