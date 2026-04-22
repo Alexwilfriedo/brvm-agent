@@ -987,11 +987,15 @@ def _most_recent_friday(ref: datetime) -> datetime:
 
 
 def _build_plays_with_pnl(
-    daily_briefs: list[Brief],
+    briefs_data: list[dict],
     latest_close_by_ticker: dict[str, float],
 ) -> list[dict]:
     """Pour chaque signal des briefs daily de la fenêtre, construit une ligne
     `play` enrichie du P&L réel (signe corrigé pour `avoid`).
+
+    Prend en entrée une liste de dicts `{brief_date, payload, signals_prices}`
+    plutôt que des instances ORM — évite les DetachedInstanceError quand
+    l'appelant a fermé sa session avant d'appeler cette fonction.
 
     Formule :
       - `direction = buy`  : pnl_pct = (current - signal) / signal × 100
@@ -1003,18 +1007,10 @@ def _build_plays_with_pnl(
     brief) est exclu — on ne peut pas calculer de P&L fiable.
     """
     plays: list[dict] = []
-    for brief in daily_briefs:
-        # On préfère reconstruire depuis `payload.opportunities` plutôt que
-        # `brief.signals` — le payload porte sector/name/thesis complets
-        # qu'on voudra citer dans le weekly, là où Signal n'a que thesis.
-        issued_on = brief.brief_date.date().isoformat()
-        opps = (brief.payload or {}).get("opportunities") or []
-        # On a aussi besoin du prix au signal (stocké dans Signal, pas dans
-        # payload) — on construit un lookup par ticker.
-        price_by_ticker = {
-            s.ticker: s.price_at_signal for s in brief.signals
-            if s.price_at_signal
-        }
+    for brief in briefs_data:
+        issued_on = brief["brief_date"].date().isoformat()
+        opps = (brief["payload"] or {}).get("opportunities") or []
+        price_by_ticker: dict[str, float] = brief["signals_prices"]
         for opp in opps:
             if not isinstance(opp, dict):
                 continue
@@ -1022,20 +1018,16 @@ def _build_plays_with_pnl(
             if not ticker:
                 continue
             direction = opp.get("direction", "watch")
-            # Les directions non-actionnables (watch/hold) sont incluses pour
-            # contexte narratif mais ne rentrent PAS dans le scorecard (le LLM
-            # et le reconcile les excluent via le filtre direction).
             signal_price = price_by_ticker.get(ticker)
             if not signal_price or signal_price <= 0:
                 continue
             current_price = latest_close_by_ticker.get(ticker)
             if current_price is None or current_price <= 0:
-                # Pas de quote plus récente : skip (on ne peut rien dire).
                 continue
             raw_pnl = (current_price - signal_price) / signal_price * 100
             if direction == "avoid":
                 raw_pnl = -raw_pnl  # inverse : baisse du titre = gain pour l'avoid
-            days_held = (datetime.now(UTC).date() - brief.brief_date.date()).days
+            days_held = (datetime.now(UTC).date() - brief["brief_date"].date()).days
             plays.append({
                 "ticker": ticker,
                 "name": opp.get("name", ""),
@@ -1168,14 +1160,29 @@ def _build_weekly_context(
     upper = week_end + timedelta(days=1)
 
     with get_session() as s:
-        # 1. Briefs daily de la semaine
-        daily_briefs = list(s.execute(
+        # 1. Briefs daily de la semaine — extraction immédiate en dict pour
+        # éviter DetachedInstanceError après sortie de la session.
+        from sqlalchemy.orm import selectinload
+        daily_briefs_orm = list(s.execute(
             select(Brief)
+            .options(selectinload(Brief.signals))  # eager-load signals pour prices
             .where(Brief.brief_type == "daily")
             .where(Brief.brief_date >= week_start)
             .where(Brief.brief_date < upper)
             .order_by(Brief.brief_date)
         ).scalars().all())
+        daily_briefs_data: list[dict] = [
+            {
+                "id": b.id,
+                "brief_date": b.brief_date,
+                "payload": b.payload or {},
+                "signals_prices": {
+                    sig.ticker: sig.price_at_signal
+                    for sig in b.signals if sig.price_at_signal
+                },
+            }
+            for b in daily_briefs_orm
+        ]
 
         # 2. Dernier close par ticker (pour calculer le P&L réel)
         # On veut le close le plus récent, pas nécessairement dans la fenêtre
@@ -1252,7 +1259,7 @@ def _build_weekly_context(
             })
 
     # 5. plays avec P&L — en dehors de la session, pas d'I/O ici
-    plays_with_pnl = _build_plays_with_pnl(daily_briefs, latest_close)
+    plays_with_pnl = _build_plays_with_pnl(daily_briefs_data, latest_close)
 
     # Trades utilisateur auto-reportés — attribution signal vs intuition
     user_trades_ctx = _build_user_trades_context(week_start, week_end, latest_close)
@@ -1261,13 +1268,13 @@ def _build_weekly_context(
     # narratif sans se noyer dans le détail.
     daily_briefs_repr = [
         {
-            "brief_id": b.id,
-            "brief_date": b.brief_date.date().isoformat(),
-            "market_regime": (b.payload or {}).get("market_regime"),
-            "market_summary": (b.payload or {}).get("market_summary", "")[:500],
-            "opportunities_count": len((b.payload or {}).get("opportunities") or []),
+            "brief_id": b["id"],
+            "brief_date": b["brief_date"].date().isoformat(),
+            "market_regime": b["payload"].get("market_regime"),
+            "market_summary": b["payload"].get("market_summary", "")[:500],
+            "opportunities_count": len(b["payload"].get("opportunities") or []),
         }
-        for b in daily_briefs
+        for b in daily_briefs_data
     ]
 
     return {
