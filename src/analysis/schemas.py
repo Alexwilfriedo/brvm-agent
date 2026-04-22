@@ -170,6 +170,22 @@ class WeeklyScorecard(BaseModel):
     worst_pnl_pct: float | None = None
 
 
+class TradeExecution(BaseModel):
+    """Observation sur les trades utilisateur de la semaine.
+
+    Pose un miroir comportemental : qu'est-ce que l'utilisateur a réellement
+    fait vs ce qu'on a recommandé ? Sert à l'audit, pas au jugement.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    total_trades: int = 0
+    following_signal: int = 0    # trades avec reason='brief' ou signal_id lié
+    autonomous: int = 0          # trades 'intuition' / 'news' / 'other'
+    avg_unrealized_pnl_pct: float | None = None
+    # Observation narrative rédigée par Opus (1-2 phrases sobres)
+    commentary: str = ""
+
+
 class WeeklyBriefPayload(BaseModel):
     """Brief hebdomadaire : audit des recos + outlook semaine suivante.
 
@@ -189,6 +205,8 @@ class WeeklyBriefPayload(BaseModel):
     week_summary: str = Field(default="")
     # Scorecard agrégé
     scorecard: WeeklyScorecard = Field(default_factory=WeeklyScorecard)
+    # Observation sur les trades utilisateur de la semaine (si déclarés)
+    trade_execution: TradeExecution = Field(default_factory=TradeExecution)
     # Calls émis, triés par conviction/P&L côté prompt
     plays: list[Play] = Field(default_factory=list)
     # News structurelles (réglementation, résultats majeurs, M&A) — pas le bruit quotidien

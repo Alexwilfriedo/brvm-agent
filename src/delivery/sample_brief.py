@@ -245,6 +245,18 @@ def sample_weekly_brief() -> dict:
                 "days_held": 1,
             },
         ],
+        "trade_execution": {
+            "total_trades": 3,
+            "following_signal": 2,
+            "autonomous": 1,
+            "avg_unrealized_pnl_pct": 2.14,
+            "commentary": (
+                "Utilisateur a suivi 2 des 3 signaux buy de la semaine (BOAC, SGBC) — "
+                "entrée à 6 550 et 14 050 FCFA, mark-to-market +2,1% agrégé. "
+                "Un trade autonome UNLC (consommation) sans correspondance dans nos "
+                "recos — à observer si ça devient un pattern."
+            ),
+        },
         "structural_news": [
             "BCEAO maintient taux directeur à 3,50% (décision 15/04)",
             "SNTS publie T1 : ARPU stable malgré ARTCI",

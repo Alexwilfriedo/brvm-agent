@@ -60,6 +60,7 @@ class WeeklyBriefSynthesizer:
         week_quotes: list[dict],
         week_news: list[dict],
         week_ahead_catalysts: list[str] | None = None,
+        user_trades: dict | None = None,
     ) -> dict:
         """Appelle Opus pour produire le brief hebdo. Retourne toujours un dict.
 
@@ -72,6 +73,9 @@ class WeeklyBriefSynthesizer:
             week_quotes : mouvement de la semaine par ticker (open/close/volume).
             week_news : news structurelles déjà filtrées en amont.
             week_ahead_catalysts : catalyseurs connus pour la semaine suivante.
+            user_trades : `{trades: [...], stats: {...}}` — trades auto-reportés
+                par l'utilisateur dans la fenêtre, avec P&L mark-to-market et
+                attribution signal vs intuition.
         """
         payload = {
             "week_start": week_start,
@@ -81,6 +85,7 @@ class WeeklyBriefSynthesizer:
             "week_quotes": week_quotes,
             "week_news": week_news,
             "week_ahead": week_ahead_catalysts or [],
+            "user_trades": user_trades or {"trades": [], "stats": {"total": 0}},
         }
         user_content = (
             "Voici les données de la semaine. Produis le JSON d'audit "
@@ -129,6 +134,9 @@ class WeeklyBriefSynthesizer:
         # ni à la `lesson` (c'est son rôle d'analyste).
         data = _reconcile_pnl(data, plays_with_pnl)
         data = _reconcile_scorecard(data)
+        # trade_execution : on garde le commentary du LLM mais on remplace
+        # les stats numériques par celles calculées côté backend.
+        data = _reconcile_trade_execution(data, user_trades)
 
         # Force les bornes demandées — le LLM peut les copier mal.
         data["week_start"] = week_start
@@ -235,6 +243,29 @@ def _reconcile_scorecard(data: dict) -> dict:
         "best_pnl_pct": best["pnl_pct"] if best else None,
         "worst_ticker": worst["ticker"] if worst else None,
         "worst_pnl_pct": worst["pnl_pct"] if worst else None,
+    }
+    return data
+
+
+def _reconcile_trade_execution(data: dict, user_trades: dict | None) -> dict:
+    """Écrase les stats de `trade_execution` avec celles du backend.
+
+    Le LLM peut renseigner `commentary` (narratif) mais pas les totaux. Si
+    l'utilisateur n'a déclaré aucun trade (`user_trades.stats.total == 0`),
+    on remonte un objet vide → le template email n'affichera pas la section.
+    """
+    stats = (user_trades or {}).get("stats") or {}
+    existing = data.get("trade_execution") or {}
+    commentary = (
+        existing.get("commentary", "")
+        if isinstance(existing, dict) else ""
+    )
+    data["trade_execution"] = {
+        "total_trades": int(stats.get("total") or 0),
+        "following_signal": int(stats.get("following_signal") or 0),
+        "autonomous": int(stats.get("autonomous") or 0),
+        "avg_unrealized_pnl_pct": stats.get("avg_unrealized_pnl_pct"),
+        "commentary": commentary,
     }
     return data
 

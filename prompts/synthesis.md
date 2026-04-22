@@ -46,16 +46,40 @@ Tu reçois quatre blocs :
 2. **`enriched_news`** : articles des dernières 36h avec métadonnées
    (tickers, sentiment, matérialité, event_type, confidence).
 3. **`ticker_fundamentals`** : pour chaque ticker mentionné dans les news
-   enrichies OU retenu comme opportunité potentielle, tu reçois un dict
-   avec :
+   enrichies OU retenu comme opportunité potentielle, tu reçois un dict avec :
+
+   **Fondamentaux (Sika)** :
    - `ticker`, `name`, `sector`, `country`
    - `close_price` (cours du jour, FCFA), `previous_close`, `variation_pct`
-   - `per`, `dividend`, `dividend_yield_pct` (valeurs à jour extraites Sika)
+   - `per`, `dividend`, `dividend_yield_pct`
    - `market_cap_mfcfa`, `beta_1y`, `rsi`
+
+   **Features techniques calculées (toutes optionnelles selon historique)** :
+   - `ma20`, `ma50` : moyennes mobiles 20j/50j en FCFA
+   - `pct_vs_ma20`, `pct_vs_ma50` : distance du cours vs MA (en %)
+   - `ma_trend` : `'haussier'` si MA20 > MA50 (+0,5%), `'baissier'` si inversé, `'neutre'` sinon
+   - `bollinger_position` : z-score du close vs MA20. > +2 = titre étiré à la hausse (risque correction), < -2 = survendu (rebond possible)
+   - `atr_pct` : volatilité journalière en % du cours. Utile pour calibrer `price_target` réaliste
+   - `volume_ratio_20` : volume du jour / moyenne 20j. > 2 = accumulation ou distribution anormale
+   - `pct_from_52w_high`, `pct_from_52w_low` : distance aux extrêmes annuels
+   - `momentum_1w_pct`, `momentum_1m_pct` : returns sur fenêtres fixes
+   - `history_days` : nombre d'observations utilisées (pondère ta confiance ; < 20 jours = données insuffisantes pour les features techniques)
+
    Utilise ces données pour chiffrer `price_current`, estimer `price_target`
    et `gain_potential_pct`, et remplir le bloc `valuation`. **Ne réinvente pas
    les chiffres** que tu as déjà dans `ticker_fundamentals` — cite-les tels
    quels.
+
+   **Comment utiliser les features techniques** :
+   - Elles **ne remplacent pas** le reasoning fondamental, elles le **complètent**. Un call `buy` basé uniquement sur "MA20 > MA50" sans catalyseur fondamental est faible.
+   - **Cohérence obligatoire** : si `bollinger_position > +2` et `momentum_1m > +15%`, un call `buy` nécessite une justification explicite (la thèse doit adresser le risque technique de surchauffe).
+   - **Prudence sur petit historique** : `history_days < 20` → ignore les features dérivées, concentre-toi sur le fondamental.
+   - **Calibration de `price_target`** : si `atr_pct = 1,8%`, un target à +20% sur 5 jours est irréaliste (~2σ/jour × 5 = 4% de mouvement "normal"). Target ∈ bande ATR × horizon raisonnable.
+
+4. **`market_snapshot.sector_rotation_5d`** : return moyen par secteur sur 5j
+   (ex: `{"Banques": +2.1, "Télécoms": -1.4}`). Utilise-le pour justifier
+   une thèse sectorielle explicite ("rotation défensives → banques, titre
+   bien positionné dans ce flux") plutôt que d'inventer un narratif isolé.
 4. **`historical_context`** : briefs des 5 derniers jours. À utiliser pour
    **cohérence** (pas de contradiction sans raison) et **non-répétition**
    (ne recycle pas la même thèse sans event nouveau).

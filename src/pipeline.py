@@ -22,6 +22,7 @@ from sqlalchemy import select, text
 
 from . import events
 from .analysis.enrichment import NewsEnricher
+from .analysis.features import compute_sector_rotation, compute_technical_features
 from .analysis.synthesis import BriefSynthesizer
 from .analysis.weekly_synthesis import WeeklyBriefSynthesizer
 from .collectors.base import CollectionResult, NewsItem
@@ -31,7 +32,7 @@ from .database import engine, get_session
 from .dates import format_date_fr
 from .delivery.email_brevo import EmailSender, render_email_html
 from .delivery.whatsapp import WhatsAppSender
-from .models import Brief, NewsArticle, PipelineRun, Quote, Signal, Source
+from .models import Brief, NewsArticle, PipelineRun, Quote, Signal, Source, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -564,6 +565,10 @@ def _build_market_snapshot() -> dict:
                 "volume": row["volume"],
             }
 
+        # Rotation sectorielle 5 jours — utile pour que Opus argumente
+        # "banques outperform télécoms cette semaine" plutôt que de deviner.
+        sector_rotation = compute_sector_rotation(s, lookback_days=5)
+
         return {
             "date": snap["trading_date"],
             "quotes_count": snap["quotes_count"],
@@ -571,16 +576,18 @@ def _build_market_snapshot() -> dict:
             "top_gainers": [_compact(r) for r in snap["movers_up"]],
             "top_losers":  [_compact(r) for r in snap["movers_down"]],
             "top_volumes": [_compact(r) for r in snap["top_volumes"]],
+            "sector_rotation_5d": sector_rotation,
         }
 
 
 def _build_ticker_fundamentals(enriched_news: list[dict]) -> list[dict]:
-    """Fondamentaux à jour par ticker mentionné dans les news enrichies.
+    """Fondamentaux + features techniques par ticker mentionné dans les news.
 
-    Pour chaque ticker extrait des `enriched_news`, on récupère la cotation la
-    plus récente en DB (close_price + extras Sika : per, dividend, dividend_yield,
-    market_cap, beta, rsi) et on l'envoie à Opus comme matière première chiffrée
-    pour remplir `price_current` / `valuation` sans inventer.
+    Pour chaque ticker extrait des `enriched_news`, on assemble :
+      - Fondamentaux (close, PER, dividende, market cap, beta, RSI — extras Sika)
+      - Features techniques calculées depuis l'historique des quotes :
+        MA20/50 + trend, Bollinger position, ATR%, volume ratio, 52w hi/lo,
+        momentum 1w/1m. Voir `analysis/features.py`.
 
     Si aucun ticker dans les news → liste vide, Opus se rabat sur le
     market_snapshot. Cap à 30 tickers (au-delà, le payload grossit sans valeur
@@ -605,7 +612,9 @@ def _build_ticker_fundamentals(enriched_news: list[dict]) -> list[dict]:
             ).scalar_one_or_none()
             if not q:
                 continue
-            out.append({
+            # Features techniques — dict potentiellement partiel selon l'historique
+            tech = compute_technical_features(ticker, s)
+            entry = {
                 "ticker": q.ticker,
                 "name": q.name or "",
                 "sector": q.sector or "",
@@ -620,7 +629,11 @@ def _build_ticker_fundamentals(enriched_news: list[dict]) -> list[dict]:
                 "market_cap_mfcfa": (q.extras or {}).get("market_cap_mfcfa"),
                 "beta_1y": (q.extras or {}).get("beta_1y"),
                 "rsi": (q.extras or {}).get("rsi"),
-            })
+            }
+            # Les features techniques sont mergées directement — Opus les voit
+            # comme des champs first-class (ma_trend, bollinger_position, …)
+            entry.update(tech)
+            out.append(entry)
     return out
 
 
@@ -1039,6 +1052,109 @@ def _build_plays_with_pnl(
     return plays
 
 
+def _build_user_trades_context(
+    week_start: datetime,
+    week_end: datetime,
+    latest_close_by_ticker: dict[str, float],
+) -> dict:
+    """Charge les trades utilisateur (auto-reportés) de la semaine et calcule
+    l'attribution signal vs intuition + P&L non-réalisé mark-to-market.
+
+    Structure de retour :
+    ```
+    {
+      "trades": [
+        {
+          "ticker": "BOAC", "action": "buy", "quantity": 50,
+          "unit_price": 6550, "executed_at": "2026-04-15",
+          "reason": "brief",  # brief | intuition | news | other
+          "linked_brief_id": 42, "linked_signal_id": 118,
+          "current_close": 6780,
+          "unrealized_pnl_pct": 3.51,      # pour les buys, mark-to-market
+          "notes": "…"
+        }
+      ],
+      "stats": {
+        "total": 3, "following_signal": 2, "autonomous": 1,
+        "avg_unrealized_pnl_pct": 1.87,
+      }
+    }
+    ```
+
+    Note : on ne tente PAS de matcher buy↔sell (FIFO) pour un P&L fermé —
+    c'est un exercice complexe qui mérite son propre service de portefeuille.
+    Ici on se contente du mark-to-market sur les buys ouverts — suffisant
+    pour qu'Opus observe "le call BOAC suivi par un achat s'est bien passé".
+    """
+    upper = week_end + timedelta(days=1)
+
+    # Extraction immédiate en dict pour éviter DetachedInstanceError après
+    # fermeture de la session SQLAlchemy.
+    raw_trades: list[dict] = []
+    with get_session() as s:
+        for t in s.execute(
+            select(Trade)
+            .where(Trade.executed_at >= week_start)
+            .where(Trade.executed_at < upper)
+            .order_by(Trade.executed_at)
+        ).scalars().all():
+            raw_trades.append({
+                "ticker": (t.ticker or "").upper(),
+                "action": t.action,
+                "quantity": t.quantity,
+                "unit_price": t.unit_price,
+                "executed_at": t.executed_at.date().isoformat(),
+                "reason": t.reason,
+                "brief_id": t.brief_id,
+                "signal_id": t.signal_id,
+                "notes": (t.notes or "")[:200],
+            })
+
+    out_trades: list[dict] = []
+    pnls: list[float] = []
+    for t in raw_trades:
+        ticker = t["ticker"]
+        current = latest_close_by_ticker.get(ticker)
+        unrealized_pnl: float | None = None
+        if (t["action"] == "buy" and current is not None
+                and t["unit_price"] and t["unit_price"] > 0):
+            unrealized_pnl = round(
+                (current - t["unit_price"]) / t["unit_price"] * 100, 2
+            )
+            pnls.append(unrealized_pnl)
+
+        out_trades.append({
+            "ticker": ticker,
+            "name": "",  # non stocké dans Trade — on pourrait le rejoindre plus tard
+            "action": t["action"],
+            "quantity": t["quantity"],
+            "unit_price": t["unit_price"],
+            "executed_at": t["executed_at"],
+            "reason": t["reason"],
+            "linked_brief_id": t["brief_id"],
+            "linked_signal_id": t["signal_id"],
+            "current_close": current,
+            "unrealized_pnl_pct": unrealized_pnl,
+            "notes": t["notes"],
+        })
+
+    following_signal = sum(
+        1 for t in raw_trades
+        if t["reason"] == "brief" or t["signal_id"] is not None
+    )
+    avg_pnl = round(sum(pnls) / len(pnls), 2) if pnls else None
+
+    return {
+        "trades": out_trades,
+        "stats": {
+            "total": len(raw_trades),
+            "following_signal": following_signal,
+            "autonomous": len(raw_trades) - following_signal,
+            "avg_unrealized_pnl_pct": avg_pnl,
+        },
+    }
+
+
 def _build_weekly_context(
     week_start: datetime,
     week_end: datetime,
@@ -1138,6 +1254,9 @@ def _build_weekly_context(
     # 5. plays avec P&L — en dehors de la session, pas d'I/O ici
     plays_with_pnl = _build_plays_with_pnl(daily_briefs, latest_close)
 
+    # Trades utilisateur auto-reportés — attribution signal vs intuition
+    user_trades_ctx = _build_user_trades_context(week_start, week_end, latest_close)
+
     # Représentation minimale des briefs daily pour que Opus ait le contexte
     # narratif sans se noyer dans le détail.
     daily_briefs_repr = [
@@ -1156,6 +1275,7 @@ def _build_weekly_context(
         "plays_with_pnl": plays_with_pnl,
         "week_quotes": week_quotes[:20],  # cap anti-prompt bloat
         "week_news": week_news,
+        "user_trades": user_trades_ctx,
     }
 
 
@@ -1276,6 +1396,7 @@ def _run_weekly_pipeline_body(run_id: int, tz: ZoneInfo, *, force: bool) -> dict
         plays_with_pnl=ctx["plays_with_pnl"],
         week_quotes=ctx["week_quotes"],
         week_news=ctx["week_news"],
+        user_trades=ctx["user_trades"],
     )
     synthesis_failed = bool(brief_json.get("_error"))
     events.publish(run_id, "weekly.synthesized",

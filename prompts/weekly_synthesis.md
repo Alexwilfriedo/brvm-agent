@@ -85,6 +85,43 @@ Pas le bruit quotidien.
 ### `week_ahead` — catalyseurs connus pour la semaine suivante
 Ex-dates dividende, publications attendues, AG, décisions BCEAO prévues.
 
+### `user_trades` — trades utilisateur auto-reportés
+Ce que l'utilisateur a **réellement exécuté** cette semaine (self-reported) :
+
+```json
+{
+  "trades": [
+    {
+      "ticker": "BOAC", "action": "buy", "quantity": 50,
+      "unit_price": 6550, "executed_at": "2026-04-15",
+      "reason": "brief",            // brief | intuition | news | other
+      "linked_brief_id": 42,        // null si trade autonome
+      "linked_signal_id": 118,
+      "current_close": 6780,
+      "unrealized_pnl_pct": 3.51    // mark-to-market sur les buys
+    }
+  ],
+  "stats": {
+    "total": 3, "following_signal": 2, "autonomous": 1,
+    "avg_unrealized_pnl_pct": 1.87
+  }
+}
+```
+
+**Rôle dans le brief** : écris un `commentary` sobre (1-2 phrases) dans
+`trade_execution.commentary` qui **observe** le comportement sans le juger.
+Ex acceptables :
+> "Utilisateur a suivi 2 signaux sur 3 (BOAC, SGBC). BOAC mark-to-market +3,5%,
+> SGBC +2,1%. Le trade autonome UNLC n'était pas dans nos recommandations."
+>
+> "Aucun trade utilisateur déclaré cette semaine malgré 3 signaux buy — à
+> contextualiser : pause volontaire ou friction d'entrée ?"
+
+**Ton à éviter** : "l'utilisateur aurait dû…", "bonne décision de…". Ce n'est
+pas notre rôle de juger — on observe, on quantifie.
+
+Si `user_trades.stats.total == 0`, laisse `trade_execution.commentary = ""`.
+
 ## Ce que tu dois produire
 
 Un **JSON strict** matchant ce schéma (retourne UNIQUEMENT le JSON, sans fence
@@ -106,6 +143,9 @@ markdown) :
     "best_pnl_pct": 4.31,
     "worst_ticker": "PALC",
     "worst_pnl_pct": -3.12
+  },
+  "trade_execution": {
+    "commentary": "Utilisateur a suivi 2 signaux sur 3 (BOAC, SGBC). Unrealized +2,8% sur le portefeuille ouvert. Un trade autonome (UNLC) sans correspondance avec nos recos — à observer si ça devient un pattern."
   },
   "plays": [
     {
