@@ -86,6 +86,30 @@ class Settings(BaseSettings):
     # Seed-only : si défini ET users vide au 1er boot, crée le 1er admin.
     initial_admin_email: str = ""
 
+    # Object storage S3-compatible (MinIO local, Railway bucket en prod).
+    # Utilisé pour stocker les blobs du backfill (PDFs / CSVs uploadés)
+    # au lieu de les garder en DB. Requis uniquement pour la feature backfill
+    # — si un job est créé sans config, l'endpoint renvoie 503 avec un message
+    # explicite plutôt qu'un crash à l'upload.
+    #
+    # MinIO local typique :
+    #   S3_ENDPOINT_URL=http://localhost:9000
+    #   S3_ACCESS_KEY_ID=minioadmin
+    #   S3_SECRET_ACCESS_KEY=minioadmin
+    #   S3_BUCKET=brvm-agent
+    #   S3_REGION=us-east-1   (MinIO accepte n'importe quoi)
+    #
+    # Railway bucket (AWS S3 par exemple) : omettre `s3_endpoint_url` pour
+    # utiliser l'endpoint AWS par défaut selon la région.
+    s3_endpoint_url: str = ""
+    s3_region: str = "us-east-1"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_bucket: str = ""
+    # Préfixe des clés dans le bucket (permet de partager un bucket entre
+    # plusieurs envs ou plusieurs apps). Laissé vide = racine du bucket.
+    s3_prefix: str = "backfill/"
+
     # Observabilité (optionnel)
     sentry_dsn: str = ""
     sentry_environment: str = "production"

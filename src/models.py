@@ -6,7 +6,9 @@ valeur soit capturée au chargement du module.
 """
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -291,6 +293,158 @@ class MarketAnalysis(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class InvestmentAnalysis(Base):
+    """Analyse d'investissement on-demand pour un ticker donné.
+
+    Produite par `analysis/investment_advisor.py` via Opus sur un ticker +
+    horizon choisi par l'utilisateur admin. Persiste chaque appel pour pouvoir
+    backtester a posteriori la qualité des recommandations (champ `outcome`
+    volontairement absent en v1 — à ajouter quand on code le job d'évaluation).
+
+    Colonnes top-level redondantes avec `payload` (recommendation, confidence,
+    price_target, stop_loss) : dénormalisation volontaire pour permettre
+    filtrage/tri SQL sans parser le JSON (ex: "toutes les buy conviction > 0.7").
+    Le reste de la réponse Opus (rationale, risks, catalysts, invalidation) vit
+    dans `payload` uniquement.
+    """
+    __tablename__ = "investment_analyses"
+    __table_args__ = (
+        Index("ix_inv_analyses_ticker_requested", "ticker", "requested_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker: Mapped[str] = mapped_column(String(16), index=True)
+    # "short" | "medium" | "long" — validation applicative côté Pydantic.
+    horizon: Mapped[str] = mapped_column(String(16), index=True)
+    # "buy" | "hold" | "avoid"
+    recommendation: Mapped[str] = mapped_column(String(16), index=True)
+    # 0.0 à 1.0 — confiance Opus dans la recommandation
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    # Snapshot du dernier close connu au moment de l'analyse — fige le prix de
+    # référence pour l'évaluation a posteriori (ne bouge jamais).
+    price_at_analysis: Mapped[float] = mapped_column(Float)
+    price_target: Mapped[float | None] = mapped_column(Float)
+    stop_loss: Mapped[float | None] = mapped_column(Float)
+    # Nombre de jours de détention proposé par Opus (dans la fenêtre de l'horizon).
+    time_horizon_days: Mapped[int | None] = mapped_column(Integer)
+    # Réponse Opus complète (rationale, risks, catalysts, invalidation…).
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Tracking coût LLM (cf MarketAnalysis : même pattern).
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    model_used: Mapped[str | None] = mapped_column(String(64))
+    # Email de l'admin qui a déclenché l'analyse (traçabilité multi-users).
+    # Null autorisé pour compat avec les appels via X-Admin-Token (pas d'user).
+    requested_by: Mapped[str | None] = mapped_column(String(255), index=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True,
+    )
+    # Flag si la réponse Opus a été servie depuis le cache applicatif (dédup 15min).
+    # Seuls les `false` correspondent à un nouvel appel LLM (facturé).
+    from_cache: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class BackfillJob(Base):
+    """Job de backfill historique reprisable (PDFs BRVM ou CSVs bulk).
+
+    Un job regroupe N items (PDFs/CSVs) uploadés ensemble. Le worker thread
+    itère sur les items pending, parse + upsert dans `quotes`, et checkpoint
+    par item (`BackfillItem.status = done|failed`). Le flag `pause_requested`
+    permet un arrêt propre sans kill.
+
+    Resume sur interruption :
+    - Crash / redeploy serveur : job reste `running` en DB → au boot, le
+      lifespan hook (`_reap_orphan_backfill_jobs` dans main.py) le passe à
+      `paused`. L'utilisateur peut le relancer via POST /resume.
+    - Pause manuelle : le runner check `pause_requested` entre chaque item
+      et finit son item en cours avant de s'arrêter.
+
+    Aucune reconstruction stateful côté worker : il lit simplement les items
+    `pending` de son job à chaque tick → trivial à reprendre.
+    """
+    __tablename__ = "backfill_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # "running" | "paused" | "completed" | "failed" | "cancelled"
+    status: Mapped[str] = mapped_column(
+        String(16), default="running", nullable=False, index=True,
+    )
+    # "pdf_brvm" | "csv" — détermine quel parser le runner appelle.
+    # Un même job ne mélange pas les types (simplifie la progression).
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    total_items: Mapped[int] = mapped_column(Integer, default=0)
+    processed_items: Mapped[int] = mapped_column(Integer, default=0)
+    failed_items: Mapped[int] = mapped_column(Integer, default=0)
+    # Total de quotes insérées/mises à jour sur l'ensemble des items traités.
+    inserted_quotes: Mapped[int] = mapped_column(Integer, default=0)
+    updated_quotes: Mapped[int] = mapped_column(Integer, default=0)
+    # Flag coopératif : le runner check ce champ entre items et s'arrête proprement.
+    # Différent de `status` : on peut avoir `status=running` + `pause_requested=true`
+    # pendant la transition (item en cours de traitement).
+    pause_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Email de l'admin qui a lancé le job (traçabilité).
+    requested_by: Mapped[str | None] = mapped_column(String(255))
+    # Message libre affichable (dernière erreur, progress status).
+    message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow,
+    )
+
+    items: Mapped[list["BackfillItem"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan",
+    )
+
+
+class BackfillItem(Base):
+    """Un fichier dans un job de backfill (1 PDF ou 1 CSV)."""
+    __tablename__ = "backfill_items"
+    __table_args__ = (
+        Index("ix_backfill_items_job_status", "job_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("backfill_jobs.id", ondelete="CASCADE"), index=True,
+    )
+    # Nom de fichier original — sert d'identifiant dans l'UI et peut porter
+    # un hint de ticker ou de date (ex: "SNTS_2024.csv" ou "boc_15_01_2024.pdf").
+    filename: Mapped[str] = mapped_column(String(255))
+    # "pdf" | "csv" — doublé par rapport à job.source_type pour simplifier
+    # les requêtes. Contrainte applicative : tous les items d'un job ont le
+    # même kind.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    # Clé de l'objet dans le bucket S3-compatible (MinIO local / Railway prod).
+    # Format : `{job_id}/{item_id}/{filename_sanitized}`. NULL après succès
+    # (l'objet est supprimé du bucket pour libérer la place). Conservé sur
+    # les items failed pour permettre un retry ultérieur.
+    storage_key: Mapped[str | None] = mapped_column(String(512))
+    # "pending" | "processing" | "done" | "failed" | "skipped"
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", nullable=False, index=True,
+    )
+    # Ticker deviné depuis le filename au moment de l'upload (CSV uniquement —
+    # le PDF est multi-ticker). NULL pour les PDFs.
+    ticker_hint: Mapped[str | None] = mapped_column(String(16))
+    inserted_quotes: Mapped[int] = mapped_column(Integer, default=0)
+    updated_quotes: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    # Metadata libre extraite par le parser (ex: date du bulletin, nb lignes
+    # parsées, etc.) — utile pour l'UI.
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow,
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    job: Mapped["BackfillJob"] = relationship(back_populates="items")
 
 
 class User(Base):

@@ -82,6 +82,12 @@ _INLINE_MIGRATIONS: list[str] = [
     "UPDATE pipeline_runs SET pipeline_type = 'weekly' WHERE status = 'no_data' AND pipeline_type = 'daily'",
     # Les runs avec summary.brief_type = 'weekly' sont aussi des weekly (success cases).
     "UPDATE pipeline_runs SET pipeline_type = 'weekly' WHERE (summary->>'brief_type') = 'weekly' AND pipeline_type = 'daily'",
+    # 2026-04 : backfill items — passage de blob bytea → storage_key (S3/MinIO).
+    # Les deux ALTER sont idempotents ; `DROP ... IF EXISTS` ne plante pas si
+    # la colonne n'a jamais été créée (déploiement neuf). `ADD ... IF NOT EXISTS`
+    # couvre les environnements déjà migrés.
+    "ALTER TABLE IF EXISTS backfill_items DROP COLUMN IF EXISTS blob",
+    "ALTER TABLE IF EXISTS backfill_items ADD COLUMN IF NOT EXISTS storage_key VARCHAR(512)",
     # Note : l'unicité par date calendaire est enforçée **côté application**
     # via `_find_brief_for_date` dans pipeline.py. Un index fonctionnel
     # Postgres type `((brief_date::date))` nécessiterait que le cast soit

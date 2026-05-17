@@ -45,3 +45,11 @@ PyJWT==2.10.1
 
 # Validation des emails pour pydantic.EmailStr (magic-link, users API)
 email-validator==2.2.0
+
+# Multipart form parsing pour les uploads CSV (/api/market/tickers/<t>/import)
+python-multipart==0.0.20
+
+# S3-compatible object storage pour les blobs de backfill (MinIO local,
+# Railway bucket en prod). boto3 fonctionne avec tout endpoint S3-compatible
+# (via config.s3_endpoint_url) — MinIO, Cloudflare R2, Wasabi, AWS S3, etc.
+boto3==1.35.90

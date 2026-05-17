@@ -13,9 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
 from . import events as event_bus
+from .api import analyze as analyze_api
 from .api import auth as auth_api
+from .api import backfill as backfill_api
 from .api import briefs, market, preview, runs, schedule, sources, stats, trades, users
 from .api import recipients as recipients_api
+from .backfill import runner as backfill_runner
+from .backfill import service as backfill_service
 from .collectors.registry import DEFAULT_SOURCES
 from .config import get_settings
 from .database import get_session, init_db
@@ -63,6 +67,50 @@ def _seed_initial_admin() -> None:
             return
         logger.info(f"Seeding du 1er admin : {email}")
         s.add(User(email=email, name=None, enabled=True))
+
+
+def _reap_orphan_backfill_jobs() -> None:
+    """Au boot : tout BackfillJob `running` est orphelin (worker tué avec le
+    process). `reap_orphan_jobs()` le passe à `paused` pour permettre un
+    resume explicite — on ne relance PAS automatiquement (l'utilisateur doit
+    confirmer, sinon un reboot en boucle relancerait un job en échec)."""
+    with get_session() as s:
+        backfill_service.reap_orphan_jobs(s)
+
+
+def _ensure_storage_bucket() -> None:
+    """Au boot : s'assure que le bucket S3 existe (création auto si absent).
+
+    Best-effort — si le storage n'est pas configuré, on log et on continue
+    sans crasher (les autres features marchent sans S3, seul `/api/backfill`
+    renverra 503). Si la création échoue (permission denied, endpoint KO),
+    on log un WARNING : l'utilisateur sera notifié au 1er upload via 503.
+    """
+    from .storage import StorageNotConfigured, get_storage
+
+    try:
+        storage = get_storage()
+    except StorageNotConfigured:
+        logger.info(
+            "[storage] S3 non configuré — feature backfill désactivée. "
+            "Set S3_BUCKET + credentials pour activer.",
+        )
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[storage] Init storage a échoué : {e}")
+        return
+
+    try:
+        created = storage.ensure_bucket()
+        if created:
+            logger.info("[storage] Bucket auto-créé au démarrage.")
+        else:
+            logger.info("[storage] Bucket déjà présent.")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"[storage] ensure_bucket a échoué : {e}. "
+            "Le 1er upload de backfill remontera l'erreur.",
+        )
 
 
 def _reap_orphan_runs() -> None:
@@ -135,6 +183,8 @@ async def lifespan(app: FastAPI):
     _seed_recipients_from_env()
     _seed_initial_admin()
     _reap_orphan_runs()
+    _reap_orphan_backfill_jobs()
+    _ensure_storage_bucket()
 
     # Test email au démarrage (opt-in via SEND_STARTUP_TEST_EMAIL=true).
     # Permet de valider la chaîne Brevo sans attendre le cron quotidien.
@@ -163,6 +213,7 @@ async def lifespan(app: FastAPI):
         logger.info("=== Arrêt BRVM Agent ===")
         scheduler.shutdown()
         event_bus.shutdown()  # annule les timers de purge SSE en vol
+        backfill_runner.shutdown_worker()  # stoppe le worker backfill proprement
 
 
 # Swagger `/docs` désactivé en prod — infos-leak mineur mais zero coût à fermer.
@@ -200,6 +251,8 @@ app.include_router(market.router)
 app.include_router(stats.router)
 app.include_router(trades.router)
 app.include_router(preview.router)
+app.include_router(analyze_api.router)
+app.include_router(backfill_api.router)
 
 
 @app.get("/health", tags=["health"])

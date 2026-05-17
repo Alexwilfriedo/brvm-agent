@@ -29,3 +29,19 @@ def _clear_settings_cache():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_storage():
+    """Garde-fou : empêche tout test de toucher un vrai bucket S3 par accident.
+
+    Injecte un `InMemoryStorage` avant chaque test et remet le singleton à plat
+    après. Si un jour des env vars S3 prod fuitent dans l'env de test, on ne
+    pollue pas le bucket réel — les put/get vivent en RAM.
+    """
+    from src.storage import InMemoryStorage, reset_storage, set_storage_for_tests
+
+    reset_storage()
+    set_storage_for_tests(InMemoryStorage())
+    yield
+    reset_storage()
